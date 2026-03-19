@@ -166,11 +166,19 @@ export async function redactTexts(texts, definedTerms, userWhitelist = new Set()
     nerByIndex.set(nerIndices[j], tagged);
   }
 
+  // Types exempt from the word-count cap (addresses, amounts, legal descriptions span many words)
+  const WORDCOUNT_EXEMPT = new Set(['ADDRESS', 'AMOUNT', 'LEGAL_DESCRIPTION', 'ZIP']);
+  const MAX_WORDS = 10;
+
   // Build merged detections per text segment
   const allMerged = texts.map((text, i) => {
     const regex = runRegexDetectors(text);
     const ner   = nerByIndex.get(i) || [];
-    return mergeDetections(regex, ner);
+    const merged = mergeDetections(regex, ner);
+    // Drop any detection longer than MAX_WORDS unless it's an exempt type
+    return merged.filter(d =>
+      WORDCOUNT_EXEMPT.has(d.type) || d.value.trim().split(/\s+/).length <= MAX_WORDS
+    );
   });
 
   // Collect low-confidence candidates (not already filtered by defined terms / whitelist)
