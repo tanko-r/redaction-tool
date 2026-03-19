@@ -160,6 +160,7 @@ export async function redactTexts(texts, definedTerms, userWhitelist = new Set()
 
   // Build per-index NER map, tagging NER results with confidence + source
   // Apply word-count cap here at the NER stage (MONEY exempt, same as AMOUNT)
+  const MAX_WORDS = 10;
   const NER_WORDCOUNT_EXEMPT = new Set(['MONEY']);
   const nerByIndex = new Map();
   for (let j = 0; j < nerIndices.length; j++) {
@@ -177,7 +178,6 @@ export async function redactTexts(texts, definedTerms, userWhitelist = new Set()
 
   // Types exempt from the word-count cap (addresses, amounts, legal descriptions span many words)
   const WORDCOUNT_EXEMPT = new Set(['ADDRESS', 'AMOUNT', 'LEGAL_DESCRIPTION', 'ZIP']);
-  const MAX_WORDS = 10;
 
   // Build merged detections per text segment
   let regexTotal = 0, nerTotal = 0, filteredTotal = 0;
