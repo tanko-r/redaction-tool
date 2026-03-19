@@ -53,7 +53,7 @@ function rebuildXml(xml, nodes, redactedTexts) {
   return out + xml.slice(pos);
 }
 
-async function redactDocx(buffer, userWhitelist = new Set()) {
+async function redactDocx(buffer, userWhitelist = new Set(), progress = () => {}) {
   const zip = await JSZip.loadAsync(buffer);
 
   // Collect all text part XMLs
@@ -66,14 +66,18 @@ async function redactDocx(buffer, userWhitelist = new Set()) {
     }
   }
 
-  // Step 1: Extract defined terms from the entire document
   const allTexts = parts.flatMap(p => p.nodes.map(n => n.text));
-  const definedTerms = extractDefinedTerms(allTexts);
+  progress({ msg: `Found ${allTexts.length} text nodes across ${parts.length} document part(s)`, pct: 15 });
 
-  // Step 2: Redact all text nodes across all parts in one NER pass
-  const { redacted, llmLog, changedNodes } = await redactTexts(allTexts, definedTerms, userWhitelist);
+  // Step 1: Extract defined terms from the entire document
+  const definedTerms = extractDefinedTerms(allTexts);
+  progress({ msg: `Extracted ${definedTerms.size} defined term(s) to preserve`, pct: 18 });
+
+  // Step 2: Redact all text nodes
+  const { redacted, llmLog, changedNodes } = await redactTexts(allTexts, definedTerms, userWhitelist, progress);
 
   // Step 3: Rebuild each XML part and write back into the zip
+  progress({ msg: 'Rebuilding document...', pct: 93 });
   let offset = 0;
   for (const part of parts) {
     const count = part.nodes.length;
@@ -94,7 +98,6 @@ async function redactDocx(buffer, userWhitelist = new Set()) {
 }
 
 app.use(express.static(path.join(__dirname, 'public')));
-
 app.use(express.json());
 
 app.post('/redact', upload.array('files'), async (req, res) => {
@@ -112,26 +115,43 @@ app.post('/redact', upload.array('files'), async (req, res) => {
     }
   } catch { /* ignore malformed whitelist */ }
 
+  // Stream NDJSON progress updates + final result
+  res.setHeader('Content-Type', 'application/x-ndjson');
+  res.setHeader('Transfer-Encoding', 'chunked');
+  const send = obj => res.write(JSON.stringify(obj) + '\n');
+
   try {
-    const results = await Promise.all(
-      req.files.map(async (file) => {
-        const { buffer, redactedNodeCount, definedTermCount, changedNodes, llmLog } = await redactDocx(file.buffer, userWhitelist);
-        return {
-          originalName: file.originalname,
-          redactedName: file.originalname.replace(/\.docx$/i, '_REDACTED.docx'),
-          buffer: buffer.toString('base64'),
-          redactedNodeCount,
-          definedTermCount,
-          changedNodes: changedNodes.slice(0, 500),
-          llmLog,
-        };
-      })
-    );
-    res.json({ results });
+    const results = [];
+    for (let fi = 0; fi < req.files.length; fi++) {
+      const file = req.files[fi];
+      const fileLabel = req.files.length > 1 ? `[${fi + 1}/${req.files.length}] ${file.originalname}` : file.originalname;
+      send({ type: 'progress', msg: `Processing ${fileLabel}`, pct: 10 });
+
+      const progress = ({ msg, pct }) => send({ type: 'progress', msg: `${fileLabel}: ${msg}`, pct });
+
+      const { buffer, redactedNodeCount, definedTermCount, changedNodes, llmLog } =
+        await redactDocx(file.buffer, userWhitelist, progress);
+
+      send({ type: 'progress', msg: `${fileLabel}: done — ${redactedNodeCount} passage(s) redacted`, pct: 97 });
+
+      results.push({
+        originalName: file.originalname,
+        redactedName: file.originalname.replace(/\.docx$/i, '_REDACTED.docx'),
+        buffer: buffer.toString('base64'),
+        redactedNodeCount,
+        definedTermCount,
+        changedNodes: changedNodes.slice(0, 500),
+        llmLog,
+      });
+    }
+
+    send({ type: 'result', results });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: err.message });
+    send({ type: 'error', error: err.message });
   }
+
+  res.end();
 });
 
 const PORT = process.env.PORT || 3737;

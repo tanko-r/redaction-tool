@@ -128,9 +128,10 @@ function applyRedactions(text, detections, definedTerms, userWhitelist = new Set
  * @param {string[]} texts        — All <w:t> content strings from the document
  * @param {Set}      definedTerms — Terms extracted from quoted phrases in the doc
  * @param {Set}      userWhitelist — User-supplied terms to preserve (lowercased)
+ * @param {Function} progress  — callback({ msg, pct }) for status updates
  * @returns {Promise<{ redacted: string[], llmLog: Array, changedNodes: Array }>}
  */
-export async function redactTexts(texts, definedTerms, userWhitelist = new Set()) {
+export async function redactTexts(texts, definedTerms, userWhitelist = new Set(), progress = () => {}) {
   // Filter to segments worth sending to NER (skip blanks and very short strings)
   const NER_MIN_LENGTH = 4;
   const nerIndices = [];
@@ -142,7 +143,10 @@ export async function redactTexts(texts, definedTerms, userWhitelist = new Set()
     }
   }
 
+  progress({ msg: `Running regex detectors on ${texts.length} node(s)...`, pct: 20 });
+
   // Run NER on qualifying texts
+  progress({ msg: `Running NLP analysis on ${nerTexts.length} qualifying node(s)...`, pct: 30 });
   let nerResults = nerTexts.map(() => []); // default empty
   if (nerTexts.length > 0) {
     try {
@@ -171,15 +175,21 @@ export async function redactTexts(texts, definedTerms, userWhitelist = new Set()
   const MAX_WORDS = 10;
 
   // Build merged detections per text segment
+  let regexTotal = 0, nerTotal = 0, filteredTotal = 0;
   const allMerged = texts.map((text, i) => {
     const regex = runRegexDetectors(text);
     const ner   = nerByIndex.get(i) || [];
+    regexTotal += regex.length;
+    nerTotal   += ner.length;
     const merged = mergeDetections(regex, ner);
     // Drop any detection longer than MAX_WORDS unless it's an exempt type
-    return merged.filter(d =>
+    const filtered = merged.filter(d =>
       WORDCOUNT_EXEMPT.has(d.type) || d.value.trim().split(/\s+/).length <= MAX_WORDS
     );
+    filteredTotal += filtered.length;
+    return filtered;
   });
+  progress({ msg: `Regex: ${regexTotal} hit(s) · NLP: ${nerTotal} hit(s) · ${filteredTotal} candidate(s) after word-count filter`, pct: 55 });
 
   // Collect low-confidence candidates (not already filtered by defined terms / whitelist)
   // and send them to the LLM in one batch call
@@ -196,8 +206,13 @@ export async function redactTexts(texts, definedTerms, userWhitelist = new Set()
 
   let llmLog = [];
   if (llmCandidates.length > 0) {
-    console.log(`LLM reviewing ${llmCandidates.length} low-confidence detection(s) in ${Math.ceil(llmCandidates.length / 20)} batch(es)...`);
-    const { approved, llmLog: log } = await llmFilter(llmCandidates);
+    const totalBatches = Math.ceil(llmCandidates.length / 20);
+    progress({ msg: `LLM reviewing ${llmCandidates.length} low-confidence candidate(s) in ${totalBatches} batch(es)...`, pct: 60 });
+    console.log(`LLM reviewing ${llmCandidates.length} low-confidence detection(s) in ${totalBatches} batch(es)...`);
+    const { approved, llmLog: log } = await llmFilter(llmCandidates, (batchNum, batchTotal, approved, rejected) => {
+      const pct = 60 + Math.round((batchNum / batchTotal) * 30);
+      progress({ msg: `LLM batch ${batchNum}/${batchTotal} complete — ${approved} approved, ${rejected} rejected`, pct });
+    });
     llmLog = log;
     llmCandidates.forEach((c, idx) => {
       if (!approved.has(idx)) {

@@ -554,16 +554,38 @@
     formData.append('whitelist', JSON.stringify(combined));
 
     try {
-      progressBar.style.width = '30%';
-      progressLabel.textContent = 'Detecting and redacting PII...';
+      progressBar.style.width = '10%';
+      progressLabel.textContent = 'Uploading...';
       const resp = await fetch('/redact', { method: 'POST', body: formData });
-      progressBar.style.width = '90%';
       if (!resp.ok) { const e = await resp.json(); throw new Error(e.error || 'Server error'); }
-      const data = await resp.json();
-      progressBar.style.width = '100%';
-      progressLabel.textContent = 'Done.';
-      redactedResults = data.results;
-      renderResults(data.results);
+
+      // Read streaming NDJSON response
+      const reader  = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop(); // keep partial line
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          let msg;
+          try { msg = JSON.parse(line); } catch { continue; }
+          if (msg.type === 'progress') {
+            progressLabel.textContent = msg.msg;
+            if (msg.pct != null) progressBar.style.width = msg.pct + '%';
+          } else if (msg.type === 'result') {
+            progressBar.style.width = '100%';
+            progressLabel.textContent = 'Done.';
+            redactedResults = msg.results;
+            renderResults(msg.results);
+          } else if (msg.type === 'error') {
+            throw new Error(msg.error);
+          }
+        }
+      }
     } catch (err) {
       errorBox.innerHTML = `<div class="error-msg">Error: ${escHtml(err.message)}</div>`;
     } finally {

@@ -82,18 +82,22 @@ async function runBatch(batch) {
  * Processes in batches of BATCH_SIZE to stay within timeout limits.
  *
  * @param {Array<{detection, context}>} candidates
+ * @param {Function} onBatch  — called after each batch: (batchNum, totalBatches, approvedCount, rejectedCount)
  * @returns {Promise<{ approved: Set<number>, llmLog: Array }>}
  *   approved — global indices (into candidates) that the LLM approved for redaction
  *   llmLog   — [{prompt, response, items:[{value,type,verdict}]}] one entry per batch
  */
-export async function llmFilter(candidates) {
+export async function llmFilter(candidates, onBatch = () => {}) {
   const approved = new Set();
   const llmLog   = [];
 
   if (!candidates.length) return { approved, llmLog };
 
+  const totalBatches = Math.ceil(candidates.length / BATCH_SIZE);
+
   for (let offset = 0; offset < candidates.length; offset += BATCH_SIZE) {
     const batch = candidates.slice(offset, offset + BATCH_SIZE);
+    const batchNum = Math.floor(offset / BATCH_SIZE) + 1;
     try {
       const { approved: batchApproved, prompt, response } = await runBatch(batch);
 
@@ -106,12 +110,14 @@ export async function llmFilter(candidates) {
       llmLog.push({ prompt, response, items });
 
       batchApproved.forEach(i => approved.add(offset + i));
+      onBatch(batchNum, totalBatches, batchApproved.size, batch.length - batchApproved.size);
 
     } catch (err) {
       console.warn(`LLM batch ${offset}–${offset + batch.length - 1} failed:`, err.message);
       // Fail open for this batch — mark all as approved
       batch.forEach((_, i) => approved.add(offset + i));
       llmLog.push({ prompt: '(failed)', response: err.message, items: [] });
+      onBatch(batchNum, totalBatches, batch.length, 0);
     }
   }
 
