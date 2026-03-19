@@ -1,6 +1,6 @@
 # Redaction Tool
 
-Browser-based tool for batch-redacting PII from legal `.docx` documents. Uploads produce clean, properly-formatted `.docx` outputs with sensitive information replaced by `[TYPE]` placeholders.
+Browser-based tool for sanitizing client or matter-specific information from legal `.docx` documents, all run completely on-device. Uploads produce clean, properly-formatted `.docx` outputs with sensitive information replaced by `[TYPE]` placeholders.
 
 ## What gets redacted
 
