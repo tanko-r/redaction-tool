@@ -33,9 +33,94 @@ const WORD_DOLLAR = new RegExp(
   'gi'
 );
 
-// ALL-CAPS entity names with business suffixes — catches what spaCy misses
-// e.g. THE CONNER HOMES GROUP, LLC  |  ASB BLAKE STREET HOLDINGS LLC
-const ALLCAPS_ENTITY = /\b[A-Z0-9][A-Z0-9\s&,.'()\-]{3,80}?(?:,\s*|\s+)(?:LLC|L\.L\.C\.|CORP(?:ORATION)?|INC(?:ORPORATED)?|LTD|L\.P\.|LLP|HOLDINGS|TRUST|PARTNERS(?:HIP)?|ASSOCIATES?|COMPANY|CO\.)\b\.?/g;
+// ─── Suffix-anchored entity detection ─────────────────────────────────────────
+// Find a business suffix, then scan backwards collecting words that are
+// ALL CAPS or Initial Caps (or numbers or & connectors).
+// This replaces the old ALLCAPS_ENTITY and MIXED_CASE_ENTITY patterns and
+// handles both "ASB PROPERTY NAME LLC" and "Random Realty Co." naturally.
+
+const BUSINESS_SUFFIXES =
+  'LLC|L\\.L\\.C\\.|Corp(?:oration)?|Inc(?:orporated)?|Ltd|LLP|L\\.P\\.|LP' +
+  '|Trust|Holdings?|Partners(?:hip)?|Associates?|Company|Co\\.' +
+  '|PS|P\\.S\\.|PLC|Group|Foundation|Services|Bank|Fund';
+
+// (?!\w) instead of \b at the end so suffixes ending in "." (Co., L.L.C.) still match
+const SUFFIX_RE = new RegExp(
+  `(?:,\\s*)?\\b(${BUSINESS_SUFFIXES})(?!\\w)`,
+  'gi'
+);
+
+function findEntitiesBySuffix(text) {
+  const results = [];
+  const re = new RegExp(SUFFIX_RE.source, 'gi');
+  let sm;
+
+  while ((sm = re.exec(text)) !== null) {
+    // Include a trailing period if the suffix doesn't already end with one (e.g. "Inc.")
+    let suffixEnd = sm.index + sm[0].length;
+    if (text[suffixEnd] === '.') suffixEnd++;
+    // Start scanning backwards from the character before the match
+    // (the optional leading comma/space is part of sm[0] but not the name)
+    let pos = sm.index - 1;
+
+    // Skip any whitespace or comma immediately before the suffix word
+    while (pos >= 0 && /[\s,]/.test(text[pos])) pos--;
+
+    let entityStart   = sm.index;
+    let nameWordCount = 0;
+
+    while (pos >= 0) {
+      // Skip whitespace/commas between tokens
+      while (pos >= 0 && /[\s,]/.test(text[pos])) pos--;
+      if (pos < 0) break;
+
+      // Scan back to the start of this token
+      const tokenEnd = pos + 1;
+      while (pos >= 0 && !/[\s,]/.test(text[pos])) pos--;
+      const tokenStart = pos + 1;
+      const token = text.slice(tokenStart, tokenEnd);
+
+      // Accept: capitalized word (ALL CAPS or Title Case), number
+      const isNameWord = /^[A-Z][A-Za-z0-9'.&-]*$/.test(token) || /^[0-9]+$/.test(token);
+      // Accept: XML-encoded or bare ampersand as connector (but only between name words)
+      const isConnector = /^(&amp;|&)$/.test(token) && nameWordCount > 0;
+
+      if (isNameWord) {
+        entityStart = tokenStart;
+        nameWordCount++;
+      } else if (isConnector) {
+        entityStart = tokenStart;
+      } else {
+        break;
+      }
+    }
+
+    if (nameWordCount === 0) continue;
+
+    // Slice original text to preserve spacing/punctuation exactly
+    let value = text.slice(entityStart, suffixEnd).trim();
+
+    // Strip any leading connector that ended up at the front
+    value = value.replace(/^(?:&amp;|&)\s*/i, '').trim();
+
+    if (value.length < 3) continue;
+
+    // Find the true start after possible leading-connector trim
+    const trueStart = text.indexOf(value, entityStart);
+    results.push({
+      type:  'ORGANIZATION',
+      value,
+      start: trueStart >= 0 ? trueStart : entityStart,
+      end:   suffixEnd,
+    });
+  }
+
+  // Remove results that are fully contained within a longer result
+  // (e.g. "ASB BLAKE STREET HOLDINGS" inside "ASB BLAKE STREET HOLDINGS LLC")
+  return results.filter(r =>
+    !results.some(other => other !== r && other.start <= r.start && other.end >= r.end)
+  );
+}
 
 // Street addresses — number + street name + suffix (+ optional suite/unit)
 const STREET_SUFFIXES = 'Street|St|Avenue|Ave|Boulevard|Blvd|Drive|Dr|Road|Rd|Lane|Ln|Way|Court|Ct|Place|Pl|Circle|Cir|Highway|Hwy|Parkway|Pkwy|Trail|Terrace|Ter|Plaza|Loop';
@@ -47,16 +132,7 @@ const STREET_ADDRESS = new RegExp(
 // P.O. Box addresses
 const PO_BOX = /\bP\.?\s*O\.?\s*Box\s+\d+\b/gi;
 
-// Mixed-case entity names with business suffixes (catches what spaCy misses due to XML entity encoding)
-// e.g. "Alston, Courtnage &amp; Bassetti LLP"  or  "4000 Property LLC"
-const ENTITY_SUFFIXES = 'LLC|L\\.L\\.C\\.|Corp(?:oration)?|Inc(?:orporated)?|Ltd|LLP|L\\.P\\.|LP|Trust|Holdings|Partners(?:hip)?|Associates?|Company|Co\\.|PS|P\\.S\\.|PLC|Group|Foundation|Services';
-const MIXED_CASE_ENTITY = new RegExp(
-  `\\b[A-Z0-9][A-Za-z0-9,.';&\\s()-]{4,80}?(?:,\\s*|\\s+)(?:${ENTITY_SUFFIXES})\\.?\\b`,
-  'g'
-);
-
-// US zip codes — 5-digit or ZIP+4, only when following a state abbreviation or city
-// (loose match — catches most cases in address contexts)
+// US zip codes — 5-digit or ZIP+4
 const ZIP_CODE = /\b\d{5}(?:-\d{4})?\b/g;
 
 // Dates in common legal document formats
@@ -66,7 +142,6 @@ const DATE_ISO     = /\b\d{4}-\d{2}-\d{2}\b/g;
 const DATE_ORDINAL = /\b(?:\d{1,2}(?:st|nd|rd|th)\s+day\s+of\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)(?:,\s+\d{4})?)\b/gi;
 
 // Legal property descriptions — trigger phrases; we redact the entire matched text node
-// (The node-level redaction in the caller handles these as "flag the whole node")
 const LEGAL_DESC_TRIGGERS = [
   /\bLot\s+\d+[A-Z]?\s*,\s*Block\s+\d+\b/gi,
   /\brecorded\s+in\s+(?:volume|book)\s+\d+\s+of\s+plats?\b/gi,
@@ -88,28 +163,23 @@ export function runRegexDetectors(text) {
   const tag = (hits, confidence, source) =>
     hits.forEach(h => results.push({ ...h, confidence, source }));
 
-  tag(findAll(text, EMAIL,         'EMAIL'),       CONFIDENCE.EMAIL,         'regex');
-  tag(findAll(text, PHONE,         'PHONE'),       CONFIDENCE.PHONE,         'regex');
-  tag(findAll(text, DOLLAR_SIGN,   'AMOUNT'),      CONFIDENCE.AMOUNT_SIGN,   'regex');
-  tag(findAll(text, ALLCAPS_ENTITY,'ORGANIZATION'),CONFIDENCE.ALLCAPS_ENTITY,'allcaps');
-  tag(findAll(text, STREET_ADDRESS,'ADDRESS'),     CONFIDENCE.ADDRESS,       'regex');
-  tag(findAll(text, PO_BOX,        'ADDRESS'),     CONFIDENCE.ADDRESS,       'regex');
-  tag(findAll(text, ZIP_CODE,      'ZIP'),         CONFIDENCE.ZIP,           'regex');
-  tag(findAll(text, DATE_LONG,     'DATE'),        CONFIDENCE.DATE_LONG,     'regex');
-  tag(findAll(text, DATE_SHORT,    'DATE'),        CONFIDENCE.DATE_SHORT,    'regex');
-  tag(findAll(text, DATE_ISO,      'DATE'),        CONFIDENCE.DATE_ISO,      'regex');
-  tag(findAll(text, DATE_ORDINAL,  'DATE'),        CONFIDENCE.DATE_ORDINAL,  'regex');
+  tag(findAll(text, EMAIL,        'EMAIL'),  CONFIDENCE.EMAIL,       'regex');
+  tag(findAll(text, PHONE,        'PHONE'),  CONFIDENCE.PHONE,       'regex');
+  tag(findAll(text, DOLLAR_SIGN,  'AMOUNT'), CONFIDENCE.AMOUNT_SIGN, 'regex');
+  tag(findAll(text, STREET_ADDRESS,'ADDRESS'),CONFIDENCE.ADDRESS,    'regex');
+  tag(findAll(text, PO_BOX,       'ADDRESS'),CONFIDENCE.ADDRESS,     'regex');
+  tag(findAll(text, ZIP_CODE,     'ZIP'),    CONFIDENCE.ZIP,         'regex');
+  tag(findAll(text, DATE_LONG,    'DATE'),   CONFIDENCE.DATE_LONG,   'regex');
+  tag(findAll(text, DATE_SHORT,   'DATE'),   CONFIDENCE.DATE_SHORT,  'regex');
+  tag(findAll(text, DATE_ISO,     'DATE'),   CONFIDENCE.DATE_ISO,    'regex');
+  tag(findAll(text, DATE_ORDINAL, 'DATE'),   CONFIDENCE.DATE_ORDINAL,'regex');
 
-  // Mixed-case entity: require at least 15 chars; confidence scales with length
-  for (const m of findAll(text, MIXED_CASE_ENTITY, 'ORGANIZATION')) {
-    const len = m.value.trim().length;
-    if (len >= 15) {
-      const confidence = len >= 30 ? CONFIDENCE.MIXED_ENTITY_LONG : CONFIDENCE.MIXED_ENTITY_MED;
-      results.push({ ...m, confidence, source: 'mixed' });
-    }
+  // Suffix-anchored entity scan — replaces old ALLCAPS_ENTITY + MIXED_CASE_ENTITY
+  for (const m of findEntitiesBySuffix(text)) {
+    results.push({ ...m, confidence: CONFIDENCE.ALLCAPS_ENTITY, source: 'suffix' });
   }
 
-  // English word dollar amounts — only include if the match contains a scale word
+  // English word dollar amounts — only if contains a scale word
   const scaleRe = /\b(?:hundred|thousand|million|billion|dollars?)\b/i;
   for (const m of findAll(text, WORD_DOLLAR, 'AMOUNT')) {
     if (scaleRe.test(m.value)) results.push({ ...m, confidence: CONFIDENCE.AMOUNT_WORD, source: 'regex' });
