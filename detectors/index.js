@@ -128,7 +128,7 @@ function applyRedactions(text, detections, definedTerms, userWhitelist = new Set
  * @param {string[]} texts        — All <w:t> content strings from the document
  * @param {Set}      definedTerms — Terms extracted from quoted phrases in the doc
  * @param {Set}      userWhitelist — User-supplied terms to preserve (lowercased)
- * @returns {Promise<string[]>} — Redacted versions of each string
+ * @returns {Promise<{ redacted: string[], llmLog: Array, changedNodes: Array }>}
  */
 export async function redactTexts(texts, definedTerms, userWhitelist = new Set()) {
   // Filter to segments worth sending to NER (skip blanks and very short strings)
@@ -186,9 +186,11 @@ export async function redactTexts(texts, definedTerms, userWhitelist = new Set()
     });
   });
 
+  let llmLog = [];
   if (llmCandidates.length > 0) {
-    console.log(`LLM reviewing ${llmCandidates.length} low-confidence detection(s)...`);
-    const approved = await llmFilter(llmCandidates);
+    console.log(`LLM reviewing ${llmCandidates.length} low-confidence detection(s) in ${Math.ceil(llmCandidates.length / 20)} batch(es)...`);
+    const { approved, llmLog: log } = await llmFilter(llmCandidates);
+    llmLog = log;
     llmCandidates.forEach((c, idx) => {
       if (!approved.has(idx)) {
         allMerged[c.textIndex][c.detectionIndex].approved = false;
@@ -196,9 +198,35 @@ export async function redactTexts(texts, definedTerms, userWhitelist = new Set()
     });
   }
 
-  return allMerged.map((detections, i) =>
-    applyRedactions(texts[i], detections, definedTerms, userWhitelist)
-  );
+  // Build changedNodes with traceability: source, confidence, llm verdict
+  const changedNodes = [];
+  const redacted = allMerged.map((detections, i) => {
+    const result = applyRedactions(texts[i], detections, definedTerms, userWhitelist);
+    if (result !== texts[i]) {
+      // Attach per-detection trace info to the node
+      const active = detections.filter(d =>
+        d.approved !== false &&
+        !definedTerms.has(normalizeTerm(d.value)) &&
+        !userWhitelist.has(d.value.toLowerCase())
+      );
+      changedNodes.push({
+        original:   texts[i],
+        redacted:   result,
+        detections: active.map(d => ({
+          value:      d.value,
+          type:       d.type,
+          source:     d.source || 'regex',
+          confidence: d.confidence ?? 1,
+          llmVerdict: d.approved === false ? 'N'
+                    : (d.confidence ?? 1) < LLM_THRESHOLD ? 'Y'
+                    : null,
+        })),
+      });
+    }
+    return result;
+  });
+
+  return { redacted, llmLog, changedNodes };
 }
 
 // Start NER process eagerly on import so it's warm by the time requests arrive

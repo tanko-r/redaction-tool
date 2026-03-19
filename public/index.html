@@ -160,6 +160,46 @@
     .red-cell  { color: #2e7d32; font-weight: 600; }
     .nodes-scroll { max-height: 320px; overflow-y: auto; }
 
+    /* Source / confidence badges */
+    .src-badge {
+      display: inline-block; border-radius: 4px; padding: 1px 6px;
+      font-size: 0.68rem; font-weight: 700; white-space: nowrap; letter-spacing: 0.2px;
+    }
+    .src-regex  { background: #e3f2fd; color: #1565c0; }
+    .src-ner    { background: #f3e5f5; color: #6a1b9a; }
+    .src-llm-y  { background: #fff8e1; color: #e65100; }
+    .src-allcaps{ background: #e8f5e9; color: #2e7d32; }
+    .src-mixed  { background: #e0f7fa; color: #006064; }
+    .conf-dot   { font-size: 0.65rem; color: #aaa; margin-left: 3px; }
+
+    /* LLM trace panel */
+    .llm-trace-toggle {
+      display: inline-block; margin-top: 14px;
+      font-size: 0.8rem; color: #e65100; cursor: pointer; user-select: none;
+    }
+    .llm-trace-body {
+      display: none; margin-top: 8px; border: 1px solid #ffe0b2;
+      border-radius: 6px; overflow: hidden; font-size: 0.75rem;
+    }
+    .llm-trace-body.open { display: block; }
+    .llm-batch {
+      border-bottom: 1px solid #ffe0b2; padding: 10px 14px;
+    }
+    .llm-batch:last-child { border-bottom: none; }
+    .llm-batch h4 { margin: 0 0 6px; font-size: 0.75rem; color: #e65100; }
+    .llm-prompt, .llm-response {
+      background: #fffde7; border-radius: 4px; padding: 7px 10px;
+      white-space: pre-wrap; word-break: break-word; margin-bottom: 6px;
+      font-family: monospace; font-size: 0.72rem; color: #333; max-height: 200px; overflow-y: auto;
+    }
+    .llm-response { background: #f1f8e9; }
+    .llm-verdict-row { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+    .llm-verdict {
+      border-radius: 4px; padding: 2px 8px; font-size: 0.7rem; font-weight: 700;
+    }
+    .llm-verdict.Y { background: #ffebee; color: #c62828; }
+    .llm-verdict.N { background: #e8f5e9; color: #2e7d32; text-decoration: line-through; color: #aaa; }
+
     /* Whitelist action buttons on node rows */
     .wl-btn {
       background: none; border: 1px solid #ddd; border-radius: 5px;
@@ -537,6 +577,37 @@
   redactBtn.addEventListener('click', runRedaction);
   reprocessBtn.addEventListener('click', runRedaction);
 
+  // ── Helpers ───────────────────────────────────────────────────────────────────
+  function sourceBadge(det) {
+    if (!det) return '';
+    const conf = det.confidence != null ? `<span class="conf-dot">${Math.round(det.confidence * 100)}%</span>` : '';
+    if (det.llmVerdict === 'Y') return `<span class="src-badge src-llm-y">Llama</span>${conf}`;
+    if (det.source === 'ner')     return `<span class="src-badge src-ner">NLP</span>${conf}`;
+    if (det.source === 'allcaps') return `<span class="src-badge src-allcaps">Regex</span>${conf}`;
+    if (det.source === 'mixed')   return `<span class="src-badge src-mixed">Regex</span>${conf}`;
+    return `<span class="src-badge src-regex">Regex</span>${conf}`;
+  }
+
+  function llmTraceHtml(llmLog, fileIdx) {
+    if (!llmLog || !llmLog.length) return '';
+    const batches = llmLog.map((b, bi) => {
+      const verdictPills = (b.items || []).map(it =>
+        `<span class="llm-verdict ${it.verdict}" title="${escHtml(it.type)}">${escHtml(it.value)}</span>`
+      ).join('');
+      return `<div class="llm-batch">
+        <h4>Batch ${bi + 1} &mdash; ${b.items?.length ?? 0} items</h4>
+        <div><strong>Prompt:</strong></div>
+        <div class="llm-prompt">${escHtml(b.prompt)}</div>
+        <div><strong>Response:</strong></div>
+        <div class="llm-response">${escHtml(b.response)}</div>
+        <div class="llm-verdict-row">${verdictPills}</div>
+      </div>`;
+    }).join('');
+    return `
+      <span class="llm-trace-toggle" data-fi="${fileIdx}">&#9654; Show Llama trace (${llmLog.length} batch${llmLog.length !== 1 ? 'es' : ''})</span>
+      <div class="llm-trace-body" id="llm-trace-${fileIdx}">${batches}</div>`;
+  }
+
   // ── Render results ────────────────────────────────────────────────────────────
   function renderResults(results) {
     resultItems.innerHTML = '';
@@ -546,23 +617,38 @@
 
       const nodesHtml = r.changedNodes?.length ? (() => {
         const rows = r.changedNodes.map(c => {
-          const orig = c.original;
-          const keepKey = orig.toLowerCase();
-          const inSession = sessionWhitelist.has(keepKey);
-          const inGlobal  = globalWhitelist.has(keepKey);
-          return `<tr>
-            <td class="orig-cell">${escHtml(orig)}</td>
-            <td class="red-cell">${escHtml(c.redacted)}</td>
-            <td style="white-space:nowrap;">
-              <div class="wl-actions">
-                <button class="wl-btn${inSession ? ' kept' : ''}" data-keep="${escHtml(keepKey)}"
-                  ${inSession ? 'disabled' : ''}>${inSession ? '✓ Kept' : 'Keep'}</button>
-                <button class="wl-btn${inGlobal ? ' starred' : ''}" data-star="${escHtml(keepKey)}"
-                  title="${inGlobal ? 'Remove from global whitelist' : 'Save to global whitelist'}"
-                  >${inGlobal ? '★ Global' : '☆ Global'}</button>
-              </div>
-            </td>
-          </tr>`;
+          const dets = c.detections || [];
+          // One sub-row per detection; span original/redacted columns across all
+          const detRows = dets.map((d, di) => {
+            const key = d.value.toLowerCase();
+            const inSession = sessionWhitelist.has(key);
+            const inGlobal  = globalWhitelist.has(key);
+            const firstCells = di === 0 ? `
+              <td class="orig-cell" rowspan="${dets.length || 1}">${escHtml(c.original)}</td>
+              <td class="red-cell"  rowspan="${dets.length || 1}">${escHtml(c.redacted)}</td>` : '';
+            return `<tr>
+              ${firstCells}
+              <td>${sourceBadge(d)} <span style="font-size:0.75rem;color:#555">${escHtml(d.value)}</span></td>
+              <td style="white-space:nowrap;">
+                <div class="wl-actions">
+                  <button class="wl-btn${inSession ? ' kept' : ''}" data-keep="${escHtml(key)}"
+                    ${inSession ? 'disabled' : ''}>${inSession ? '✓ Kept' : 'Keep'}</button>
+                  <button class="wl-btn${inGlobal ? ' starred' : ''}" data-star="${escHtml(key)}"
+                    title="${inGlobal ? 'Remove from global whitelist' : 'Save to global whitelist'}"
+                    >${inGlobal ? '★ Global' : '☆ Global'}</button>
+                </div>
+              </td>
+            </tr>`;
+          });
+          // If no detection metadata (old data), fall back to a single row
+          if (!detRows.length) {
+            return `<tr>
+              <td class="orig-cell">${escHtml(c.original)}</td>
+              <td class="red-cell">${escHtml(c.redacted)}</td>
+              <td></td><td></td>
+            </tr>`;
+          }
+          return detRows.join('');
         }).join('');
 
         return `
@@ -570,11 +656,12 @@
           <div class="nodes-list" id="nodes-${i}">
             <div class="nodes-scroll">
               <table class="nodes-table">
-                <thead><tr><th>Original</th><th>Redacted</th><th></th></tr></thead>
+                <thead><tr><th>Original</th><th>Redacted</th><th>Source</th><th></th></tr></thead>
                 <tbody>${rows}</tbody>
               </table>
             </div>
-          </div>`;
+          </div>
+          ${llmTraceHtml(r.llmLog, i)}`;
       })() : '';
 
       const item = document.createElement('div');
@@ -603,6 +690,17 @@
         t.innerHTML = list.classList.contains('open')
           ? t.innerHTML.replace('▼', '▲')
           : t.innerHTML.replace('▲', '▼');
+      });
+    });
+
+    // Toggle LLM trace panel
+    resultItems.querySelectorAll('.llm-trace-toggle').forEach(t => {
+      t.addEventListener('click', () => {
+        const body = document.getElementById('llm-trace-' + t.dataset.fi);
+        body.classList.toggle('open');
+        t.innerHTML = body.classList.contains('open')
+          ? t.innerHTML.replace('▶', '▼')
+          : t.innerHTML.replace('▼', '▶');
       });
     });
 

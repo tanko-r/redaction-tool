@@ -71,22 +71,14 @@ async function redactDocx(buffer, userWhitelist = new Set()) {
   const definedTerms = extractDefinedTerms(allTexts);
 
   // Step 2: Redact all text nodes across all parts in one NER pass
-  const redacted = await redactTexts(allTexts, definedTerms, userWhitelist);
+  const { redacted, llmLog, changedNodes } = await redactTexts(allTexts, definedTerms, userWhitelist);
 
   // Step 3: Rebuild each XML part and write back into the zip
   let offset = 0;
-  const changedNodes = [];
   for (const part of parts) {
     const count = part.nodes.length;
     const partRedacted = redacted.slice(offset, offset + count);
     offset += count;
-
-    for (let i = 0; i < count; i++) {
-      if (partRedacted[i] !== part.nodes[i].text) {
-        changedNodes.push({ original: part.nodes[i].text, redacted: partRedacted[i] });
-      }
-    }
-
     const newXml = rebuildXml(part.xml, part.nodes, partRedacted);
     zip.file(part.filename, newXml);
   }
@@ -97,6 +89,7 @@ async function redactDocx(buffer, userWhitelist = new Set()) {
     redactedNodeCount: changedNodes.length,
     definedTermCount: definedTerms.size,
     changedNodes,
+    llmLog,
   };
 }
 
@@ -122,7 +115,7 @@ app.post('/redact', upload.array('files'), async (req, res) => {
   try {
     const results = await Promise.all(
       req.files.map(async (file) => {
-        const { buffer, redactedNodeCount, definedTermCount, changedNodes } = await redactDocx(file.buffer, userWhitelist);
+        const { buffer, redactedNodeCount, definedTermCount, changedNodes, llmLog } = await redactDocx(file.buffer, userWhitelist);
         return {
           originalName: file.originalname,
           redactedName: file.originalname.replace(/\.docx$/i, '_REDACTED.docx'),
@@ -130,6 +123,7 @@ app.post('/redact', upload.array('files'), async (req, res) => {
           redactedNodeCount,
           definedTermCount,
           changedNodes: changedNodes.slice(0, 500),
+          llmLog,
         };
       })
     );
