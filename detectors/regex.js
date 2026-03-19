@@ -80,40 +80,47 @@ const LEGAL_DESC_TRIGGERS = [
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
+import { CONFIDENCE } from './llm.js';
+
 export function runRegexDetectors(text) {
   const results = [];
 
-  results.push(...findAll(text, EMAIL,        'EMAIL'));
-  results.push(...findAll(text, PHONE,        'PHONE'));
-  results.push(...findAll(text, DOLLAR_SIGN,  'AMOUNT'));
-  results.push(...findAll(text, ALLCAPS_ENTITY, 'ORGANIZATION'));
+  const tag = (hits, confidence, source) =>
+    hits.forEach(h => results.push({ ...h, confidence, source }));
 
-  // Mixed-case entity: require at least 15 chars total to filter generic two-word phrases
+  tag(findAll(text, EMAIL,         'EMAIL'),       CONFIDENCE.EMAIL,         'regex');
+  tag(findAll(text, PHONE,         'PHONE'),       CONFIDENCE.PHONE,         'regex');
+  tag(findAll(text, DOLLAR_SIGN,   'AMOUNT'),      CONFIDENCE.AMOUNT_SIGN,   'regex');
+  tag(findAll(text, ALLCAPS_ENTITY,'ORGANIZATION'),CONFIDENCE.ALLCAPS_ENTITY,'allcaps');
+  tag(findAll(text, STREET_ADDRESS,'ADDRESS'),     CONFIDENCE.ADDRESS,       'regex');
+  tag(findAll(text, PO_BOX,        'ADDRESS'),     CONFIDENCE.ADDRESS,       'regex');
+  tag(findAll(text, ZIP_CODE,      'ZIP'),         CONFIDENCE.ZIP,           'regex');
+  tag(findAll(text, DATE_LONG,     'DATE'),        CONFIDENCE.DATE_LONG,     'regex');
+  tag(findAll(text, DATE_SHORT,    'DATE'),        CONFIDENCE.DATE_SHORT,    'regex');
+  tag(findAll(text, DATE_ISO,      'DATE'),        CONFIDENCE.DATE_ISO,      'regex');
+  tag(findAll(text, DATE_ORDINAL,  'DATE'),        CONFIDENCE.DATE_ORDINAL,  'regex');
+
+  // Mixed-case entity: require at least 15 chars; confidence scales with length
   for (const m of findAll(text, MIXED_CASE_ENTITY, 'ORGANIZATION')) {
-    if (m.value.trim().length >= 15) results.push(m);
+    const len = m.value.trim().length;
+    if (len >= 15) {
+      const confidence = len >= 30 ? CONFIDENCE.MIXED_ENTITY_LONG : CONFIDENCE.MIXED_ENTITY_MED;
+      results.push({ ...m, confidence, source: 'mixed' });
+    }
   }
-  results.push(...findAll(text, STREET_ADDRESS, 'ADDRESS'));
-  results.push(...findAll(text, PO_BOX,         'ADDRESS'));
-  results.push(...findAll(text, ZIP_CODE,     'ZIP'));
-  results.push(...findAll(text, DATE_LONG,    'DATE'));
-  results.push(...findAll(text, DATE_SHORT,   'DATE'));
-  results.push(...findAll(text, DATE_ISO,     'DATE'));
-  results.push(...findAll(text, DATE_ORDINAL, 'DATE'));
 
   // English word dollar amounts — only include if the match contains a scale word
-  // (avoids catching bare number words like "one" or "two")
   const scaleRe = /\b(?:hundred|thousand|million|billion|dollars?)\b/i;
   for (const m of findAll(text, WORD_DOLLAR, 'AMOUNT')) {
-    if (scaleRe.test(m.value)) results.push(m);
+    if (scaleRe.test(m.value)) results.push({ ...m, confidence: CONFIDENCE.AMOUNT_WORD, source: 'regex' });
   }
 
   // Legal description triggers — flag the whole text node via a sentinel
   for (const re of LEGAL_DESC_TRIGGERS) {
-    const matches = findAll(text, re, 'LEGAL_DESCRIPTION');
-    if (matches.length) {
-      // Replace the entire text node content (start=0, end=text.length)
-      results.push({ type: 'LEGAL_DESCRIPTION', value: text, start: 0, end: text.length });
-      break; // one sentinel is enough per node
+    if (findAll(text, re, 'LEGAL_DESCRIPTION').length) {
+      results.push({ type: 'LEGAL_DESCRIPTION', value: text, start: 0, end: text.length,
+        confidence: CONFIDENCE.LEGAL_DESCRIPTION, source: 'regex' });
+      break;
     }
   }
 

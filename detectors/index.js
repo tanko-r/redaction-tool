@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { runRegexDetectors } from './regex.js';
+import { llmFilter, CONFIDENCE, LLM_THRESHOLD } from './llm.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const NER_SCRIPT = path.join(__dirname, 'ner.py');
@@ -100,8 +101,9 @@ function mergeDetections(regexHits, nerHits) {
 }
 
 function applyRedactions(text, detections, definedTerms, userWhitelist = new Set()) {
-  // Filter out defined terms and user-whitelisted values before applying
+  // Filter out defined terms, user-whitelisted values, and LLM-rejected detections
   const active = detections.filter(d =>
+    d.approved !== false &&
     !definedTerms.has(normalizeTerm(d.value)) &&
     !userWhitelist.has(d.value.toLowerCase())
   );
@@ -151,19 +153,52 @@ export async function redactTexts(texts, definedTerms, userWhitelist = new Set()
     }
   }
 
-  // Build per-index NER map
+  // Build per-index NER map, tagging NER results with confidence + source
   const nerByIndex = new Map();
   for (let j = 0; j < nerIndices.length; j++) {
-    nerByIndex.set(nerIndices[j], nerResults[j] || []);
+    const tagged = (nerResults[j] || []).map(d => ({
+      ...d,
+      confidence: d.type === 'PERSON' ? CONFIDENCE.NER_PERSON
+                : d.type === 'ORG'    ? CONFIDENCE.NER_ORG
+                :                       CONFIDENCE.NER_MONEY,
+      source: 'ner',
+    }));
+    nerByIndex.set(nerIndices[j], tagged);
   }
 
-  // Redact each text segment
-  return texts.map((text, i) => {
+  // Build merged detections per text segment
+  const allMerged = texts.map((text, i) => {
     const regex = runRegexDetectors(text);
     const ner   = nerByIndex.get(i) || [];
-    const merged = mergeDetections(regex, ner);
-    return applyRedactions(text, merged, definedTerms, userWhitelist);
+    return mergeDetections(regex, ner);
   });
+
+  // Collect low-confidence candidates (not already filtered by defined terms / whitelist)
+  // and send them to the LLM in one batch call
+  const llmCandidates = []; // { textIndex, detectionIndex, detection, context }
+  allMerged.forEach((detections, ti) => {
+    detections.forEach((d, di) => {
+      if ((d.confidence ?? 1) < LLM_THRESHOLD &&
+          !definedTerms.has(normalizeTerm(d.value)) &&
+          !userWhitelist.has(d.value.toLowerCase())) {
+        llmCandidates.push({ textIndex: ti, detectionIndex: di, detection: d, context: texts[ti] });
+      }
+    });
+  });
+
+  if (llmCandidates.length > 0) {
+    console.log(`LLM reviewing ${llmCandidates.length} low-confidence detection(s)...`);
+    const approved = await llmFilter(llmCandidates);
+    llmCandidates.forEach((c, idx) => {
+      if (!approved.has(idx)) {
+        allMerged[c.textIndex][c.detectionIndex].approved = false;
+      }
+    });
+  }
+
+  return allMerged.map((detections, i) =>
+    applyRedactions(texts[i], detections, definedTerms, userWhitelist)
+  );
 }
 
 // Start NER process eagerly on import so it's warm by the time requests arrive
