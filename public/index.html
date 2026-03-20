@@ -72,8 +72,8 @@
       cursor: pointer; font-size: 0.88rem; color: #3f51b5; font-weight: 600;
       list-style: none; user-select: none;
     }
-    details.settings summary::before { content: '▶  '; font-size: 0.7rem; }
-    details.settings[open] summary::before { content: '▼  '; }
+    details.settings summary::before { content: '\25B6  '; font-size: 0.7rem; }
+    details.settings[open] summary::before { content: '\25BC  '; }
     .settings-grid {
       display: grid; grid-template-columns: 1fr 1fr; gap: 16px 24px;
       margin-top: 16px; padding: 18px; background: #f7f8fc; border-radius: 8px;
@@ -265,8 +265,8 @@
       font-size: 0.82rem; color: #888; cursor: pointer; user-select: none;
       display: flex; align-items: center; gap: 6px;
     }
-    #global-wl-toggle::before { content: '▶'; font-size: 0.65rem; }
-    #global-wl-toggle.open::before { content: '▼'; }
+    #global-wl-toggle::before { content: '\25B6'; font-size: 0.65rem; }
+    #global-wl-toggle.open::before { content: '\25BC'; }
     #global-wl-body { display: none; margin-top: 10px; }
     #global-wl-body.open { display: block; }
     .global-tags {
@@ -287,14 +287,87 @@
       background: #ffebee; border: 1px solid #ef9a9a; border-radius: 8px;
       padding: 12px 16px; color: #c62828; font-size: 0.9rem; margin-top: 16px;
     }
+
+    /* Model setup panel */
+    #model-card .model-row {
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 14px; background: #f7f8fc; border-radius: 8px; margin-bottom: 8px;
+    }
+    #model-card .model-row .model-name { font-weight: 600; font-size: 0.9rem; flex: 1; }
+    #model-card .model-row .model-status { font-size: 0.8rem; color: #888; }
+    #model-card .model-row .model-status.ready { color: #2e7d32; }
+    #model-card .model-row .model-status.error { color: #c62828; }
+    #model-card .model-row button {
+      padding: 6px 14px; border-radius: 6px; border: 1px solid #3f51b5;
+      background: #fff; color: #3f51b5; font-size: 0.82rem; font-weight: 600; cursor: pointer;
+    }
+    #model-card .model-row button:hover { background: #e8eaf6; }
+    #model-card .model-row button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .model-progress { width: 100%; height: 4px; background: #e8eaf6; border-radius: 2px; margin-top: 6px; overflow: hidden; display: none; }
+    .model-progress.active { display: block; }
+    .model-progress-bar { height: 100%; background: #3f51b5; border-radius: 2px; width: 0%; transition: width 0.3s; }
+    .model-note { font-size: 0.75rem; color: #999; margin-top: 4px; }
+
+    /* LLM backend selector */
+    .llm-backend-group { margin-top: 12px; padding: 12px 14px; background: #f7f8fc; border-radius: 8px; }
+    .llm-backend-group label { font-size: 0.83rem; font-weight: 600; color: #444; display: block; margin-bottom: 8px; }
+    .llm-backend-options { display: flex; gap: 12px; flex-wrap: wrap; }
+    .llm-backend-options label { font-weight: normal; display: flex; align-items: center; gap: 5px; font-size: 0.85rem; cursor: pointer; }
   </style>
 </head>
 <body>
 
 <header>
   <h1>Document Redaction Tool</h1>
-  <p>Upload .docx files to automatically detect and redact PII</p>
+  <p>Upload .docx files to automatically detect and redact PII &mdash; runs entirely in your browser</p>
 </header>
+
+<!-- Model setup card -->
+<div class="card" id="model-card">
+  <h2>AI Models</h2>
+
+  <div class="model-row" id="ner-row">
+    <div>
+      <div class="model-name">NER Model (entity detection)</div>
+      <div class="model-note">~170 MB download, cached after first load</div>
+    </div>
+    <span class="model-status" id="ner-status">Not loaded</span>
+    <button id="ner-load-btn">Load Model</button>
+  </div>
+  <div class="model-progress" id="ner-progress"><div class="model-progress-bar" id="ner-progress-bar"></div></div>
+
+  <div class="llm-backend-group">
+    <label>LLM Backend (optional &mdash; improves accuracy for ambiguous entities)</label>
+    <div class="llm-backend-options">
+      <label><input type="radio" name="llm-backend" value="none" checked> None</label>
+      <label><input type="radio" name="llm-backend" value="webllm"> In-Browser (WebGPU)</label>
+      <label><input type="radio" name="llm-backend" value="ollama"> Ollama (localhost)</label>
+    </div>
+  </div>
+
+  <div class="model-row" id="llm-row" style="display:none; margin-top:8px;">
+    <div>
+      <div class="model-name" id="llm-model-name">WebLLM: Qwen2.5-1.5B</div>
+      <div class="model-note" id="llm-model-note">~800 MB download, requires WebGPU</div>
+    </div>
+    <span class="model-status" id="llm-status">Not loaded</span>
+    <button id="llm-load-btn">Load Model</button>
+  </div>
+  <div class="model-progress" id="llm-progress"><div class="model-progress-bar" id="llm-progress-bar"></div></div>
+
+  <div id="ollama-config" style="display:none; margin-top:8px;">
+    <div class="model-row">
+      <div>
+        <div class="model-name">Ollama</div>
+        <div class="model-note">Connects to Ollama running on localhost:11434</div>
+      </div>
+      <span class="model-status" id="ollama-status">Checking...</span>
+      <select id="ollama-model-select" style="width:auto;padding:5px 8px;border-radius:6px;border:1px solid #ddd;font-size:0.82rem;">
+        <option value="">Checking...</option>
+      </select>
+    </div>
+  </div>
+</div>
 
 <div class="card">
   <div id="dropzone">
@@ -313,7 +386,6 @@
   <details class="settings" id="settings-panel">
     <summary>What gets redacted</summary>
     <div class="settings-grid">
-
       <div class="full-col">
         <label>Detection Categories</label>
         <div class="check-group">
@@ -333,15 +405,6 @@
         <input type="text" id="whitelist-input" placeholder="e.g. King County, Washington, Escrow Agent">
         <small>Comma-separated words or phrases that should never be redacted.</small>
       </div>
-
-      <div class="full-col">
-        <label>LLM Model</label>
-        <select id="model-select">
-          <option value="">Loading...</option>
-        </select>
-        <small>Local Ollama model used for low-confidence second-opinion checks.</small>
-      </div>
-
     </div>
   </details>
 
@@ -362,14 +425,12 @@
   <h2>Redacted Files</h2>
   <div id="result-items"></div>
 
-  <!-- Re-process bar (shown when session whitelist has items) -->
   <div id="reprocess-bar">
     <p>&#128683; Kept this session:</p>
     <div class="session-tags" id="session-tags"></div>
     <button class="primary" id="reprocess-btn" style="padding:9px 18px;font-size:0.88rem;">Re-process</button>
   </div>
 
-  <!-- Global whitelist panel -->
   <div id="global-wl-panel">
     <div id="global-wl-toggle">Globally preserved terms (<span id="global-wl-count">0</span>)</div>
     <div id="global-wl-body">
@@ -383,8 +444,12 @@
   </div>
 </div>
 
-<script>
-  // ── Elements ──────────────────────────────────────────────────────────────────
+<script type="module">
+  import { redactDocx } from './js/engine.js';
+  import { loadNER, isNERLoaded } from './js/ner.js';
+  import { loadWebLLM, checkOllama, setBackend, isLLMReady, getLLMBackend } from './js/llm.js';
+
+  // ── Elements ──────────────────────────────────────────────────────────────
   const fileInput        = document.getElementById('file-input');
   const dropzone         = document.getElementById('dropzone');
   const fileList         = document.getElementById('file-list');
@@ -408,15 +473,30 @@
   const globalTagsEl     = document.getElementById('global-tags');
   const globalWlCount    = document.getElementById('global-wl-count');
 
-  // ── State ─────────────────────────────────────────────────────────────────────
+  // Model controls
+  const nerLoadBtn       = document.getElementById('ner-load-btn');
+  const nerStatus        = document.getElementById('ner-status');
+  const nerProgress      = document.getElementById('ner-progress');
+  const nerProgressBar   = document.getElementById('ner-progress-bar');
+  const llmRow           = document.getElementById('llm-row');
+  const llmLoadBtn       = document.getElementById('llm-load-btn');
+  const llmStatus        = document.getElementById('llm-status');
+  const llmModelName     = document.getElementById('llm-model-name');
+  const llmModelNote     = document.getElementById('llm-model-note');
+  const llmProgress      = document.getElementById('llm-progress');
+  const llmProgressBar   = document.getElementById('llm-progress-bar');
+  const ollamaConfig     = document.getElementById('ollama-config');
+  const ollamaStatus     = document.getElementById('ollama-status');
+  const ollamaModelSelect= document.getElementById('ollama-model-select');
+  const backendRadios    = document.querySelectorAll('input[name="llm-backend"]');
+
+  // ── State ─────────────────────────────────────────────────────────────────
   let selectedFiles    = [];
   let redactedResults  = [];
-  // Session whitelist: cleared on page reload
   let sessionWhitelist = new Set();
-  // Global whitelist: persisted on server (whitelist.json)
   let globalWhitelist  = new Set();
 
-  // ── Helpers ───────────────────────────────────────────────────────────────────
+  // ── Helpers ───────────────────────────────────────────────────────────────
   function formatBytes(b) {
     if (b < 1024) return b + ' B';
     if (b < 1024*1024) return (b/1024).toFixed(1) + ' KB';
@@ -427,61 +507,117 @@
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
 
-  function downloadBase64(b64, filename) {
-    const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
-    const blob = new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+  function downloadBlob(data, filename) {
+    const blob = new Blob([data], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.href = url; a.download = filename; a.click();
     setTimeout(() => URL.revokeObjectURL(url), 5000);
   }
 
-  async function saveGlobalWhitelist() {
-    await fetch('/api/whitelist', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ terms: [...globalWhitelist] }),
+  // ── Whitelist persistence (localStorage) ──────────────────────────────────
+  const WL_KEY = 'redaction_global_whitelist';
+  function saveGlobalWhitelist() {
+    localStorage.setItem(WL_KEY, JSON.stringify([...globalWhitelist]));
+  }
+  function loadGlobalWhitelist() {
+    try {
+      const raw = localStorage.getItem(WL_KEY);
+      if (raw) globalWhitelist = new Set(JSON.parse(raw));
+    } catch { /* ignore */ }
+  }
+  loadGlobalWhitelist();
+
+  // ── Model setup ───────────────────────────────────────────────────────────
+  nerLoadBtn.addEventListener('click', async () => {
+    nerLoadBtn.disabled = true;
+    nerStatus.textContent = 'Loading...';
+    nerStatus.className = 'model-status';
+    nerProgress.classList.add('active');
+
+    try {
+      await loadNER((progress) => {
+        if (progress.status === 'progress' && progress.total) {
+          const pct = Math.round((progress.loaded / progress.total) * 100);
+          nerProgressBar.style.width = pct + '%';
+          nerStatus.textContent = `Downloading... ${pct}%`;
+        } else if (progress.status === 'ready') {
+          nerStatus.textContent = 'Ready';
+        }
+      });
+      nerStatus.textContent = 'Ready';
+      nerStatus.className = 'model-status ready';
+      nerLoadBtn.textContent = 'Loaded';
+      nerProgress.classList.remove('active');
+    } catch (err) {
+      nerStatus.textContent = 'Error: ' + err.message;
+      nerStatus.className = 'model-status error';
+      nerLoadBtn.disabled = false;
+      nerProgress.classList.remove('active');
+    }
+  });
+
+  // LLM backend selection
+  backendRadios.forEach(radio => {
+    radio.addEventListener('change', () => {
+      const val = radio.value;
+      llmRow.style.display = val === 'webllm' ? 'flex' : 'none';
+      ollamaConfig.style.display = val === 'ollama' ? 'block' : 'none';
+      if (val === 'none') setBackend(null);
+      if (val === 'ollama') initOllama();
     });
+  });
+
+  llmLoadBtn.addEventListener('click', async () => {
+    llmLoadBtn.disabled = true;
+    llmStatus.textContent = 'Loading...';
+    llmStatus.className = 'model-status';
+    llmProgress.classList.add('active');
+
+    try {
+      await loadWebLLM((progress) => {
+        if (progress.text) llmStatus.textContent = progress.text;
+        if (progress.progress != null) {
+          const pct = Math.round(progress.progress * 100);
+          llmProgressBar.style.width = pct + '%';
+        }
+      });
+      llmStatus.textContent = 'Ready';
+      llmStatus.className = 'model-status ready';
+      llmLoadBtn.textContent = 'Loaded';
+      llmProgress.classList.remove('active');
+    } catch (err) {
+      llmStatus.textContent = 'Error: ' + err.message;
+      llmStatus.className = 'model-status error';
+      llmLoadBtn.disabled = false;
+      llmProgress.classList.remove('active');
+    }
+  });
+
+  async function initOllama() {
+    ollamaStatus.textContent = 'Checking...';
+    const { available, models } = await checkOllama();
+    if (available && models.length) {
+      ollamaStatus.textContent = 'Connected';
+      ollamaStatus.className = 'model-status ready';
+      ollamaModelSelect.innerHTML = models.map(m => `<option value="${m}">${m}</option>`).join('');
+      setBackend('ollama');
+    } else {
+      ollamaStatus.textContent = available ? 'No models found' : 'Not reachable';
+      ollamaStatus.className = 'model-status error';
+      ollamaModelSelect.innerHTML = '<option value="">N/A</option>';
+    }
   }
 
-  // Load global whitelist from server on startup
-  (async () => {
-    try {
-      const resp = await fetch('/api/whitelist');
-      const { terms } = await resp.json();
-      globalWhitelist = new Set(terms || []);
-      renderGlobalPanel();
-    } catch { /* server unavailable, start empty */ }
-  })();
-
-  // ── Model selector ────────────────────────────────────────────────────────────
-  const modelSelect = document.getElementById('model-select');
-  const MODEL_KEY   = 'redaction_model_v1';
-
-  (async () => {
-    try {
-      const resp = await fetch('/api/models');
-      const { models } = await resp.json();
-      const saved = localStorage.getItem(MODEL_KEY);
-      modelSelect.innerHTML = models.length
-        ? models.map(m => `<option value="${m}"${m === saved ? ' selected' : ''}>${m}</option>`).join('')
-        : '<option value="">No models found</option>';
-    } catch {
-      modelSelect.innerHTML = '<option value="">Ollama unavailable</option>';
-    }
-    modelSelect.addEventListener('change', () => localStorage.setItem(MODEL_KEY, modelSelect.value));
-  })();
-
-  // ── Progress checklist ────────────────────────────────────────────────────────
+  // ── Progress checklist ────────────────────────────────────────────────────
   function addStep(msg) {
-    // Mark the previous active step as done
     const prev = progressSteps.querySelector('li.active');
     if (prev) {
       prev.classList.replace('active', 'done');
-      prev.querySelector('.step-icon').textContent = '✓';
+      prev.querySelector('.step-icon').textContent = '\u2713';
     }
     const li = document.createElement('li');
     li.className = 'active';
-    li.innerHTML = `<span class="step-icon"><span class="spinner">⟳</span></span><span>${escHtml(msg)}</span>`;
+    li.innerHTML = `<span class="step-icon"><span class="spinner">\u27F3</span></span><span>${escHtml(msg)}</span>`;
     progressSteps.appendChild(li);
     progressSteps.scrollTop = progressSteps.scrollHeight;
   }
@@ -489,15 +625,12 @@
   function completeAllSteps() {
     progressSteps.querySelectorAll('li.active').forEach(li => {
       li.classList.replace('active', 'done');
-      li.querySelector('.step-icon').textContent = '✓';
+      li.querySelector('.step-icon').textContent = '\u2713';
     });
   }
+  function resetSteps() { progressSteps.innerHTML = ''; }
 
-  function resetSteps() {
-    progressSteps.innerHTML = '';
-  }
-
-  // ── File management ───────────────────────────────────────────────────────────
+  // ── File management ───────────────────────────────────────────────────────
   function renderFileList() {
     fileItems.innerHTML = '';
     if (!selectedFiles.length) { fileList.style.display = 'none'; redactBtn.disabled = true; return; }
@@ -542,7 +675,7 @@
     renderReprocessBar();
   });
 
-  // ── Session whitelist UI ──────────────────────────────────────────────────────
+  // ── Session whitelist UI ──────────────────────────────────────────────────
   function renderReprocessBar() {
     const checks = resultItems.querySelectorAll('.reprocess-check');
     if (!sessionWhitelist.size) {
@@ -551,7 +684,6 @@
       return;
     }
     reprocessBar.classList.add('visible');
-    // Show checkboxes on result items
     checks.forEach(cb => cb.classList.add('visible'));
     updateReprocessLabel();
     sessionTagsEl.innerHTML = '';
@@ -585,7 +717,7 @@
     if (e.target.classList.contains('reprocess-check')) updateReprocessLabel();
   });
 
-  // ── Global whitelist UI ───────────────────────────────────────────────────────
+  // ── Global whitelist UI ───────────────────────────────────────────────────
   function renderGlobalPanel() {
     if (!globalWhitelist.size) {
       globalWlPanel.classList.remove('has-terms');
@@ -616,13 +748,12 @@
     globalWlBody.classList.toggle('open');
   });
 
-  // ── Refresh Keep/Star button states after whitelist changes ───────────────────
   function refreshNodeRowButtons() {
     document.querySelectorAll('.wl-btn[data-keep]').forEach(btn => {
       const term = btn.dataset.keep;
       const inSession = sessionWhitelist.has(term);
       btn.classList.toggle('kept', inSession);
-      btn.textContent = inSession ? '✓ Kept' : 'Keep';
+      btn.textContent = inSession ? '\u2713 Kept' : 'Keep';
       btn.disabled = inSession;
     });
     document.querySelectorAll('.wl-btn[data-star]').forEach(btn => {
@@ -630,15 +761,14 @@
       const starred = globalWhitelist.has(term);
       btn.classList.toggle('starred', starred);
       btn.title = starred ? 'Remove from global whitelist' : 'Save to global whitelist';
-      btn.textContent = starred ? '★ Global' : '☆ Global';
+      btn.textContent = starred ? '\u2605 Global' : '\u2606 Global';
     });
   }
 
-  // ── Submit / redact ───────────────────────────────────────────────────────────
+  // ── Submit / redact ───────────────────────────────────────────────────────
   async function runRedaction() {
     if (!selectedFiles.length) return;
 
-    // Determine which files to send — all on first run, only checked on reprocess
     let filesToSend = selectedFiles;
     let reprocessIndices = null;
     if (redactedResults.length) {
@@ -658,59 +788,57 @@
     progressSection.style.display = 'block';
     progressBar.style.width = '5%';
     resetSteps();
-    addStep(`Uploading ${filesToSend.length} file(s)...`);
+    addStep(`Processing ${filesToSend.length} file(s) locally...`);
 
-    // Combine: manual text input + session whitelist + global whitelist
     const manualTerms = document.getElementById('whitelist-input').value
       .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
-    const combined = [...new Set([
+    const combined = new Set([
       ...manualTerms,
       ...[...sessionWhitelist].map(s => s.toLowerCase()),
       ...[...globalWhitelist].map(s => s.toLowerCase()),
-    ])];
+    ]);
 
-    const formData = new FormData();
-    filesToSend.forEach(f => formData.append('files', f));
-    formData.append('whitelist', JSON.stringify(combined));
-    if (modelSelect.value) formData.append('model', modelSelect.value);
+    const ollamaModel = getLLMBackend() === 'ollama' ? ollamaModelSelect.value : null;
 
     try {
-      progressBar.style.width = '10%';
-      const resp = await fetch('/redact', { method: 'POST', body: formData });
-      if (!resp.ok) { const e = await resp.json(); throw new Error(e.error || 'Server error'); }
+      const results = [];
+      for (let fi = 0; fi < filesToSend.length; fi++) {
+        const file = filesToSend[fi];
+        const fileLabel = filesToSend.length > 1 ? `[${fi + 1}/${filesToSend.length}] ${file.name}` : file.name;
+        addStep(`Processing ${fileLabel}`);
+        progressBar.style.width = '10%';
 
-      // Read streaming NDJSON response
-      const reader  = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = '';
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        const lines = buf.split('\n');
-        buf = lines.pop();
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          let msg;
-          try { msg = JSON.parse(line); } catch { continue; }
-          if (msg.type === 'progress') {
-            addStep(msg.msg);
-            if (msg.pct != null) progressBar.style.width = msg.pct + '%';
-          } else if (msg.type === 'result') {
-            progressBar.style.width = '100%';
-            completeAllSteps();
-            if (reprocessIndices) {
-              // Merge new results back into existing results at the correct positions
-              msg.results.forEach((r, ni) => { redactedResults[reprocessIndices[ni]] = r; });
-            } else {
-              redactedResults = msg.results;
-            }
-            renderResults(redactedResults);
-          } else if (msg.type === 'error') {
-            throw new Error(msg.error);
-          }
-        }
+        const arrayBuffer = await file.arrayBuffer();
+        const progress = ({ msg, pct }) => {
+          addStep(`${fileLabel}: ${msg}`);
+          if (pct != null) progressBar.style.width = pct + '%';
+        };
+
+        const { buffer, redactedNodeCount, definedTermCount, changedNodes, llmLog } =
+          await redactDocx(arrayBuffer, combined, progress, ollamaModel);
+
+        addStep(`${fileLabel}: done \u2014 ${redactedNodeCount} passage(s) redacted`);
+
+        results.push({
+          originalName: file.name,
+          redactedName: file.name.replace(/\.docx$/i, '_REDACTED.docx'),
+          buffer,
+          redactedNodeCount,
+          definedTermCount,
+          changedNodes: changedNodes.slice(0, 500),
+          llmLog,
+        });
       }
+
+      progressBar.style.width = '100%';
+      completeAllSteps();
+
+      if (reprocessIndices) {
+        results.forEach((r, ni) => { redactedResults[reprocessIndices[ni]] = r; });
+      } else {
+        redactedResults = results;
+      }
+      renderResults(redactedResults);
     } catch (err) {
       errorBox.innerHTML = `<div class="error-msg">Error: ${escHtml(err.message)}</div>`;
     } finally {
@@ -724,11 +852,11 @@
   redactBtn.addEventListener('click', runRedaction);
   reprocessBtn.addEventListener('click', runRedaction);
 
-  // ── Helpers ───────────────────────────────────────────────────────────────────
+  // ── Helpers ───────────────────────────────────────────────────────────────
   function sourceBadge(det) {
     if (!det) return '';
     const conf = det.confidence != null ? `<span class="conf-dot">${Math.round(det.confidence * 100)}%</span>` : '';
-    if (det.llmVerdict === 'Y')       return `<span class="src-badge src-llm-y">Llama</span>${conf}`;
+    if (det.llmVerdict === 'Y')       return `<span class="src-badge src-llm-y">LLM</span>${conf}`;
     if (det.source === 'propagated')  return `<span class="src-badge src-propagated">Propagated</span>${conf}`;
     if (det.source === 'ner')         return `<span class="src-badge src-ner">NLP</span>${conf}`;
     if (det.source === 'suffix')      return `<span class="src-badge src-allcaps">Suffix</span>${conf}`;
@@ -751,11 +879,11 @@
       </div>`;
     }).join('');
     return `
-      <span class="llm-trace-toggle" data-fi="${fileIdx}">&#9654; Show Llama trace (${llmLog.length} batch${llmLog.length !== 1 ? 'es' : ''})</span>
+      <span class="llm-trace-toggle" data-fi="${fileIdx}">&#9654; Show LLM trace (${llmLog.length} batch${llmLog.length !== 1 ? 'es' : ''})</span>
       <div class="llm-trace-body" id="llm-trace-${fileIdx}">${batches}</div>`;
   }
 
-  // ── Render results ────────────────────────────────────────────────────────────
+  // ── Render results ────────────────────────────────────────────────────────
   function renderResults(results) {
     resultItems.innerHTML = '';
     results.forEach((r, i) => {
@@ -765,7 +893,6 @@
       const nodesHtml = r.changedNodes?.length ? (() => {
         const rows = r.changedNodes.map(c => {
           const dets = c.detections || [];
-          // One sub-row per detection; span original/redacted columns across all
           const detRows = dets.map((d, di) => {
             const key = d.value.toLowerCase();
             const inSession = sessionWhitelist.has(key);
@@ -779,15 +906,14 @@
               <td style="white-space:nowrap;">
                 <div class="wl-actions">
                   <button class="wl-btn${inSession ? ' kept' : ''}" data-keep="${escHtml(key)}"
-                    ${inSession ? 'disabled' : ''}>${inSession ? '✓ Kept' : 'Keep'}</button>
+                    ${inSession ? 'disabled' : ''}>${inSession ? '\u2713 Kept' : 'Keep'}</button>
                   <button class="wl-btn${inGlobal ? ' starred' : ''}" data-star="${escHtml(key)}"
                     title="${inGlobal ? 'Remove from global whitelist' : 'Save to global whitelist'}"
-                    >${inGlobal ? '★ Global' : '☆ Global'}</button>
+                    >${inGlobal ? '\u2605 Global' : '\u2606 Global'}</button>
                 </div>
               </td>
             </tr>`;
           });
-          // If no detection metadata (old data), fall back to a single row
           if (!detRows.length) {
             return `<tr>
               <td class="orig-cell">${escHtml(c.original)}</td>
@@ -799,7 +925,7 @@
         }).join('');
 
         return `
-          <span class="nodes-toggle" data-i="${i}">&#9660; Show ${r.changedNodes.length} redacted passages</span>
+          <span class="nodes-toggle" data-i="${i}">\u25BC Show ${r.changedNodes.length} redacted passages</span>
           <div class="nodes-list" id="nodes-${i}">
             <div class="nodes-scroll">
               <table class="nodes-table">
@@ -820,7 +946,7 @@
         </div>
         <div class="result-meta">
           From: ${r.originalName}
-          &nbsp;&middot;&nbsp; ${r.definedTermCount} defined term${r.definedTermCount !== 1 ? 's' : ''} preserved
+          &nbsp;\u00B7&nbsp; ${r.definedTermCount} defined term${r.definedTermCount !== 1 ? 's' : ''} preserved
         </div>
         ${nodesHtml}
         <div class="result-footer">
@@ -831,37 +957,33 @@
       resultItems.appendChild(item);
     });
 
-    // Toggle expand/collapse of nodes list
     resultItems.querySelectorAll('.nodes-toggle').forEach(t => {
       t.addEventListener('click', () => {
         const list = document.getElementById('nodes-' + t.dataset.i);
         list.classList.toggle('open');
         t.innerHTML = list.classList.contains('open')
-          ? t.innerHTML.replace('▼', '▲')
-          : t.innerHTML.replace('▲', '▼');
+          ? t.innerHTML.replace('\u25BC', '\u25B2')
+          : t.innerHTML.replace('\u25B2', '\u25BC');
       });
     });
 
-    // Toggle LLM trace panel
     resultItems.querySelectorAll('.llm-trace-toggle').forEach(t => {
       t.addEventListener('click', () => {
         const body = document.getElementById('llm-trace-' + t.dataset.fi);
         body.classList.toggle('open');
         t.innerHTML = body.classList.contains('open')
-          ? t.innerHTML.replace('▶', '▼')
-          : t.innerHTML.replace('▼', '▶');
+          ? t.innerHTML.replace('\u25B6', '\u25BC')
+          : t.innerHTML.replace('\u25BC', '\u25B6');
       });
     });
 
-    // Download buttons
     resultItems.querySelectorAll('.download-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         const r = redactedResults[+btn.dataset.i];
-        downloadBase64(r.buffer, r.redactedName);
+        downloadBlob(r.buffer, r.redactedName);
       });
     });
 
-    // Keep buttons — add to session whitelist
     resultItems.querySelectorAll('.wl-btn[data-keep]').forEach(btn => {
       btn.addEventListener('click', () => {
         const term = btn.dataset.keep;
@@ -871,7 +993,6 @@
       });
     });
 
-    // Star buttons — toggle global whitelist
     resultItems.querySelectorAll('.wl-btn[data-star]').forEach(btn => {
       btn.addEventListener('click', () => {
         const term = btn.dataset.star;
@@ -879,7 +1000,6 @@
           globalWhitelist.delete(term);
         } else {
           globalWhitelist.add(term);
-          // Also keep in session for re-process
           sessionWhitelist.add(term);
         }
         saveGlobalWhitelist();
@@ -897,10 +1017,9 @@
   }
 
   downloadAllBtn.addEventListener('click', () => {
-    redactedResults.forEach((r, i) => setTimeout(() => downloadBase64(r.buffer, r.redactedName), i * 100));
+    redactedResults.forEach((r, i) => setTimeout(() => downloadBlob(r.buffer, r.redactedName), i * 100));
   });
 
-  // Show global panel on load if there are saved terms
   renderGlobalPanel();
 </script>
 </body>
