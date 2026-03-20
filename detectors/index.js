@@ -289,7 +289,6 @@ export async function redactTexts(texts, definedTerms, userWhitelist = new Set()
 
     const totalBatches = Math.ceil(uniqueCandidates.length / 20);
     progress({ msg: `LLM reviewing ${uniqueCandidates.length} unique value(s) (${llmCandidates.length} total candidate(s)) in ${totalBatches} batch(es)...`, pct: 60 });
-    console.log(`LLM reviewing ${uniqueCandidates.length} unique value(s) (deduped from ${llmCandidates.length}) in ${totalBatches} batch(es)...`);
     const { approved: approvedUnique, llmLog: log } = await llmFilter(uniqueCandidates, (batchNum, batchTotal, approved, rejected) => {
       const pct = 60 + Math.round((batchNum / batchTotal) * 30);
       progress({ msg: `LLM batch ${batchNum}/${batchTotal} complete — ${approved} approved, ${rejected} rejected`, pct });
