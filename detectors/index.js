@@ -121,6 +121,49 @@ function applyRedactions(text, detections, definedTerms, userWhitelist = new Set
   return out + text.slice(pos);
 }
 
+// ─── Value propagation ────────────────────────────────────────────────────────
+// Given a Map of lc-value → {type, confidence, source}, scan all text nodes and
+// inject detections for any occurrence not already covered.
+function propagateValues(texts, allMerged, valueMap, definedTerms, userWhitelist) {
+  if (valueMap.size === 0) return 0;
+  let added = 0;
+  texts.forEach((text, i) => {
+    const existing = allMerged[i];
+    const lcText = text.toLowerCase();
+    for (const [lcValue, meta] of valueMap) {
+      if (definedTerms.has(normalizeTerm(lcValue)) || userWhitelist.has(lcValue)) continue;
+      let searchPos = 0;
+      while (true) {
+        const found = lcText.indexOf(lcValue, searchPos);
+        if (found === -1) break;
+        const end = found + lcValue.length;
+        // Only add if this span isn't already covered
+        const covered = existing.some(d => d.start < end && d.end > found);
+        if (!covered) {
+          existing.push({
+            type:       meta.type,
+            value:      text.slice(found, end),
+            start:      found,
+            end,
+            confidence: meta.confidence,
+            source:     'propagated',
+          });
+          added++;
+        }
+        searchPos = found + 1;
+      }
+    }
+    // Re-sort and de-overlap after additions
+    existing.sort((a, b) => a.start - b.start);
+    const merged = [];
+    for (const d of existing) {
+      if (!merged.length || d.start >= merged.at(-1).end) merged.push(d);
+    }
+    allMerged[i] = merged;
+  });
+  return added;
+}
+
 // ─── Main entry point ─────────────────────────────────────────────────────────
 
 /**
@@ -196,6 +239,22 @@ export async function redactTexts(texts, definedTerms, userWhitelist = new Set()
   });
   progress({ msg: `Regex: ${regexTotal} hit(s) · NLP: ${nerTotal} hit(s) · ${filteredTotal} candidate(s) after word-count filter`, pct: 55 });
 
+  // Phase A: propagate high-confidence values (>= LLM_THRESHOLD) to all nodes before LLM.
+  // This both catches missed occurrences and reduces the LLM candidate pool.
+  const highConfMap = new Map();
+  allMerged.forEach(detections => {
+    detections.forEach(d => {
+      if ((d.confidence ?? 1) >= LLM_THRESHOLD) {
+        const key = d.value.toLowerCase();
+        if (!highConfMap.has(key))
+          highConfMap.set(key, { type: d.type, confidence: d.confidence ?? 1, source: d.source });
+      }
+    });
+  });
+  const propAdded = propagateValues(texts, allMerged, highConfMap, definedTerms, userWhitelist);
+  if (propAdded > 0)
+    progress({ msg: `Propagated ${highConfMap.size} high-confidence value(s) → ${propAdded} additional detection(s)`, pct: 57 });
+
   // Collect low-confidence candidates (not already filtered by defined terms / whitelist)
   // and send them to the LLM in one batch call
   const llmCandidates = []; // { textIndex, detectionIndex, detection, context }
@@ -211,19 +270,56 @@ export async function redactTexts(texts, definedTerms, userWhitelist = new Set()
 
   let llmLog = [];
   if (llmCandidates.length > 0) {
-    const totalBatches = Math.ceil(llmCandidates.length / 20);
-    progress({ msg: `LLM reviewing ${llmCandidates.length} low-confidence candidate(s) in ${totalBatches} batch(es)...`, pct: 60 });
-    console.log(`LLM reviewing ${llmCandidates.length} low-confidence detection(s) in ${totalBatches} batch(es)...`);
-    const { approved, llmLog: log } = await llmFilter(llmCandidates, (batchNum, batchTotal, approved, rejected) => {
+    // Deduplicate by lowercased value — send each unique entity value once to the LLM,
+    // then fan the verdict back to all candidates sharing that value.
+    const valueToIndices = new Map(); // lc value → [candidate indices]
+    llmCandidates.forEach((c, idx) => {
+      const key = c.detection.value.toLowerCase();
+      if (!valueToIndices.has(key)) valueToIndices.set(key, []);
+      valueToIndices.get(key).push(idx);
+    });
+
+    // One representative candidate per unique value
+    const uniqueCandidates = [];
+    const uniqueKeys = [];
+    for (const [key, indices] of valueToIndices) {
+      uniqueCandidates.push(llmCandidates[indices[0]]);
+      uniqueKeys.push(key);
+    }
+
+    const totalBatches = Math.ceil(uniqueCandidates.length / 20);
+    progress({ msg: `LLM reviewing ${uniqueCandidates.length} unique value(s) (${llmCandidates.length} total candidate(s)) in ${totalBatches} batch(es)...`, pct: 60 });
+    console.log(`LLM reviewing ${uniqueCandidates.length} unique value(s) (deduped from ${llmCandidates.length}) in ${totalBatches} batch(es)...`);
+    const { approved: approvedUnique, llmLog: log } = await llmFilter(uniqueCandidates, (batchNum, batchTotal, approved, rejected) => {
       const pct = 60 + Math.round((batchNum / batchTotal) * 30);
       progress({ msg: `LLM batch ${batchNum}/${batchTotal} complete — ${approved} approved, ${rejected} rejected`, pct });
     }, model);
     llmLog = log;
-    llmCandidates.forEach((c, idx) => {
-      if (!approved.has(idx)) {
+
+    // Build a set of rejected value keys, then mark all candidates sharing that value
+    const rejectedKeys = new Set();
+    uniqueKeys.forEach((key, i) => {
+      if (!approvedUnique.has(i)) rejectedKeys.add(key);
+    });
+
+    llmCandidates.forEach((c) => {
+      if (rejectedKeys.has(c.detection.value.toLowerCase())) {
         allMerged[c.textIndex][c.detectionIndex].approved = false;
       }
     });
+
+    // Phase B: propagate LLM-approved values to catch remaining occurrences in other nodes
+    const llmApprovedMap = new Map();
+    uniqueKeys.forEach((key, i) => {
+      if (approvedUnique.has(i)) {
+        const c = uniqueCandidates[i];
+        if (!llmApprovedMap.has(key))
+          llmApprovedMap.set(key, { type: c.detection.type, confidence: 0.85, source: 'propagated' });
+      }
+    });
+    const llmPropAdded = propagateValues(texts, allMerged, llmApprovedMap, definedTerms, userWhitelist);
+    if (llmPropAdded > 0)
+      progress({ msg: `Propagated ${llmApprovedMap.size} LLM-approved value(s) → ${llmPropAdded} additional detection(s)`, pct: 92 });
   }
 
   // Build changedNodes with traceability: source, confidence, llm verdict

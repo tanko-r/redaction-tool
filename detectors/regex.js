@@ -100,8 +100,8 @@ function findEntitiesBySuffix(text) {
     // Slice original text to preserve spacing/punctuation exactly
     let value = text.slice(entityStart, suffixEnd).trim();
 
-    // Strip any leading connector that ended up at the front
-    value = value.replace(/^(?:&amp;|&)\s*/i, '').trim();
+    // Strip any orphaned connector at the front or back
+    value = value.replace(/^(?:&amp;|&)\s*/i, '').replace(/\s*(?:&amp;|&)$/i, '').trim();
 
     if (value.length < 3) continue;
 

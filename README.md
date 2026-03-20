@@ -26,7 +26,7 @@ The GUI shows the source of each detection (Regex / NLP / Llama), the confidence
 ## Whitelist
 
 - **Session whitelist** — click *Keep* on any flagged passage to suppress it for the current session, then click *Re-process*.
-- **Global whitelist** — click *☆ Global* to persist a term across sessions (stored in `localStorage`). Starred terms are always excluded.
+- **Global whitelist** — click *☆ Global* to preserve a term across sessions (stored in `localStorage`). Starred terms are always preserved from redaction.
 - **Manual terms** — enter comma-separated terms in the *What gets redacted* panel before processing.
 
 ## Requirements

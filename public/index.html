@@ -186,8 +186,9 @@
     .src-regex  { background: #e3f2fd; color: #1565c0; }
     .src-ner    { background: #f3e5f5; color: #6a1b9a; }
     .src-llm-y  { background: #fff8e1; color: #e65100; }
-    .src-allcaps{ background: #e8f5e9; color: #2e7d32; }
-    .src-mixed  { background: #e0f7fa; color: #006064; }
+    .src-allcaps    { background: #e8f5e9; color: #2e7d32; }
+    .src-mixed      { background: #e0f7fa; color: #006064; }
+    .src-propagated { background: #fce4ec; color: #880e4f; }
     .conf-dot   { font-size: 0.65rem; color: #aaa; margin-left: 3px; }
 
     /* LLM trace panel */
@@ -677,9 +678,10 @@
   function sourceBadge(det) {
     if (!det) return '';
     const conf = det.confidence != null ? `<span class="conf-dot">${Math.round(det.confidence * 100)}%</span>` : '';
-    if (det.llmVerdict === 'Y') return `<span class="src-badge src-llm-y">Llama</span>${conf}`;
-    if (det.source === 'ner')    return `<span class="src-badge src-ner">NLP</span>${conf}`;
-    if (det.source === 'suffix') return `<span class="src-badge src-allcaps">Suffix</span>${conf}`;
+    if (det.llmVerdict === 'Y')       return `<span class="src-badge src-llm-y">Llama</span>${conf}`;
+    if (det.source === 'propagated')  return `<span class="src-badge src-propagated">Propagated</span>${conf}`;
+    if (det.source === 'ner')         return `<span class="src-badge src-ner">NLP</span>${conf}`;
+    if (det.source === 'suffix')      return `<span class="src-badge src-allcaps">Suffix</span>${conf}`;
     return `<span class="src-badge src-regex">Regex</span>${conf}`;
   }
 
