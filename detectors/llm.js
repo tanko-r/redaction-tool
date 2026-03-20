@@ -60,25 +60,38 @@ async function runBatch(batch, model) {
     return `${i + 1}. [${c.detection.type}] "${c.detection.value}" in: "${ctx}"`;
   });
 
-  // Prompt design rationale:
-  //   Y criteria: named specific person or named specific organization — the key word
-  //     is "specific named", not "private". Public utilities and government bodies
-  //     that are actual parties (Puget Sound Energy, Seattle Housing Authority) are Y.
-  //   N criteria: enumerated with examples matching known false-positive patterns:
-  //     generic roles (Buyer/Seller/Trustee), legal concepts (Material Casualty),
-  //     jurisdictions (King County), and generic noun phrases (Title Company).
+  // Prompt design: few-shot examples with interleaved Y/N patterns plus a key rule
+  //   line that resolves edge cases (person names vs "X Party" roles, fragments).
   //   No format instruction needed — output is grammar-constrained via Ollama format schema.
   const prompt =
-    `You are a redaction classifier for legal real-estate documents.\n` +
-    `For each detected entity, decide whether it should be redacted.\n\n` +
-    `Redact (Y) if it is:\n` +
-    `- A specific named person (e.g. "John D. Smith", "Maria Gonzalez")\n` +
-    `- A specific named organization or company (e.g. "Pacific Realty LLC", "Puget Sound Energy")\n\n` +
-    `Keep (N) if it is:\n` +
-    `- A generic role or placeholder (e.g. Buyer, Seller, Trustee, Borrower, Indemnified Party)\n` +
-    `- A legal concept or defined term (e.g. Material Casualty, Force Majeure Event, Effective Date)\n` +
-    `- A jurisdiction, county, or state (e.g. King County, Washington State)\n` +
-    `- A generic descriptive phrase (e.g. Title Company, Closing Agent, Arbitration Panel)\n\n` +
+    `Classify each entity: Y = redact (real name), N = keep (generic term).\n\n` +
+    `EXAMPLES:\n` +
+    `[PERSON] "James A. Carter" → Y (real person name)\n` +
+    `[PERSON] "Elena Vasquez" → Y (real person name)\n` +
+    `[PERSON] "Thomas R. Bennett Jr." → Y (real person name)\n` +
+    `[PERSON] "the Guarantor" → N (generic role, not a name)\n` +
+    `[PERSON] "Beneficiary" → N (generic role)\n` +
+    `[PERSON] "Lender" → N (generic role)\n` +
+    `[ORG] "Greenfield Properties LLC" → Y (specific company — has LLC)\n` +
+    `[ORG] "Apex Commercial Lending Inc" → Y (specific company — has Inc)\n` +
+    `[ORG] "Northstar Capital Advisors" → Y (specific firm name)\n` +
+    `[ORG] "Columbia River Electric" → Y (specific utility company)\n` +
+    `[ORG] "Portland Development Commission" → Y (specific government agency)\n` +
+    `[ORG] "Redwood Equity Partners" → Y (specific firm name)\n` +
+    `[ORG] "Secured Party" → N (generic role)\n` +
+    `[ORG] "Escrow Company" → N (generic placeholder)\n` +
+    `[ORG] "Settlement Agent" → N (generic role)\n` +
+    `[ORG] "Review Board" → N (generic body)\n` +
+    `[ORG] "Substantial Damage" → N (legal defined term)\n` +
+    `[ORG] "Partial Condemnation" → N (legal defined term)\n` +
+    `[ORG] "Act of God" → N (legal defined term)\n` +
+    `[ORG] "Commencement Date" → N (legal defined term)\n` +
+    `[ORG] "Cure Notice" → N (legal defined term)\n` +
+    `[ORG] "Excluded Assets" → N (legal defined term)\n` +
+    `[ORG] "Clark County" → N (jurisdiction)\n` +
+    `[ORG] "Oregon State" → N (jurisdiction)\n\n` +
+    `Key: [PERSON] "Firstname Lastname" → Y. [PERSON] "X Party" → N. Fragments → N.\n\n` +
+    `NOW CLASSIFY:\n` +
     lines.join('\n');
 
   // Grammar-constrained output: use an object schema with required numbered keys.
