@@ -126,7 +126,9 @@
       display: flex; flex-direction: column;
       padding: 14px 16px; border: 1px solid #e8e8e8; border-radius: 8px; margin-bottom: 10px;
     }
-    .result-header { display: flex; align-items: baseline; gap: 8px; margin-bottom: 2px; }
+    .result-header { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
+    .reprocess-check { width: 16px; height: 16px; accent-color: #3f51b5; cursor: pointer; display: none; }
+    .reprocess-check.visible { display: inline-block; }
     .result-item .result-name { font-weight: 600; font-size: 0.92rem; }
     .result-item .result-meta { font-size: 0.78rem; color: #888; margin-bottom: 6px; }
     .result-footer {
@@ -411,9 +413,8 @@
   let redactedResults  = [];
   // Session whitelist: cleared on page reload
   let sessionWhitelist = new Set();
-  // Global whitelist: persisted in localStorage
-  const GLOBAL_WL_KEY  = 'redaction_global_whitelist_v1';
-  let globalWhitelist  = new Set(JSON.parse(localStorage.getItem(GLOBAL_WL_KEY) || '[]'));
+  // Global whitelist: persisted on server (whitelist.json)
+  let globalWhitelist  = new Set();
 
   // ── Helpers ───────────────────────────────────────────────────────────────────
   function formatBytes(b) {
@@ -434,9 +435,23 @@
     setTimeout(() => URL.revokeObjectURL(url), 5000);
   }
 
-  function saveGlobalWhitelist() {
-    localStorage.setItem(GLOBAL_WL_KEY, JSON.stringify([...globalWhitelist]));
+  async function saveGlobalWhitelist() {
+    await fetch('/api/whitelist', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ terms: [...globalWhitelist] }),
+    });
   }
+
+  // Load global whitelist from server on startup
+  (async () => {
+    try {
+      const resp = await fetch('/api/whitelist');
+      const { terms } = await resp.json();
+      globalWhitelist = new Set(terms || []);
+      renderGlobalPanel();
+    } catch { /* server unavailable, start empty */ }
+  })();
 
   // ── Model selector ────────────────────────────────────────────────────────────
   const modelSelect = document.getElementById('model-select');
@@ -529,11 +544,16 @@
 
   // ── Session whitelist UI ──────────────────────────────────────────────────────
   function renderReprocessBar() {
+    const checks = resultItems.querySelectorAll('.reprocess-check');
     if (!sessionWhitelist.size) {
       reprocessBar.classList.remove('visible');
+      checks.forEach(cb => cb.classList.remove('visible'));
       return;
     }
     reprocessBar.classList.add('visible');
+    // Show checkboxes on result items
+    checks.forEach(cb => cb.classList.add('visible'));
+    updateReprocessLabel();
     sessionTagsEl.innerHTML = '';
     for (const term of [...sessionWhitelist].sort()) {
       const tag = document.createElement('span');
@@ -543,12 +563,26 @@
     }
   }
 
+  function updateReprocessLabel() {
+    const checks = resultItems.querySelectorAll('.reprocess-check');
+    if (!checks.length) return;
+    const checked = resultItems.querySelectorAll('.reprocess-check:checked').length;
+    reprocessBtn.textContent = checked === checks.length
+      ? 'Re-process all'
+      : `Re-process ${checked} of ${checks.length}`;
+    reprocessBtn.disabled = checked === 0;
+  }
+
   sessionTagsEl.addEventListener('click', e => {
     if (e.target.tagName === 'BUTTON') {
       sessionWhitelist.delete(e.target.dataset.term);
       renderReprocessBar();
       refreshNodeRowButtons();
     }
+  });
+
+  resultItems.addEventListener('change', e => {
+    if (e.target.classList.contains('reprocess-check')) updateReprocessLabel();
   });
 
   // ── Global whitelist UI ───────────────────────────────────────────────────────
@@ -603,6 +637,20 @@
   // ── Submit / redact ───────────────────────────────────────────────────────────
   async function runRedaction() {
     if (!selectedFiles.length) return;
+
+    // Determine which files to send — all on first run, only checked on reprocess
+    let filesToSend = selectedFiles;
+    let reprocessIndices = null;
+    if (redactedResults.length) {
+      const checks = resultItems.querySelectorAll('.reprocess-check');
+      if (checks.length) {
+        reprocessIndices = [];
+        checks.forEach(cb => { if (cb.checked) reprocessIndices.push(+cb.dataset.i); });
+        if (reprocessIndices.length === 0) return;
+        filesToSend = reprocessIndices.map(i => selectedFiles[i]);
+      }
+    }
+
     errorBox.innerHTML = '';
     redactBtn.disabled = true;
     clearBtn.disabled = true;
@@ -610,7 +658,7 @@
     progressSection.style.display = 'block';
     progressBar.style.width = '5%';
     resetSteps();
-    addStep(`Uploading ${selectedFiles.length} file(s)...`);
+    addStep(`Uploading ${filesToSend.length} file(s)...`);
 
     // Combine: manual text input + session whitelist + global whitelist
     const manualTerms = document.getElementById('whitelist-input').value
@@ -622,7 +670,7 @@
     ])];
 
     const formData = new FormData();
-    selectedFiles.forEach(f => formData.append('files', f));
+    filesToSend.forEach(f => formData.append('files', f));
     formData.append('whitelist', JSON.stringify(combined));
     if (modelSelect.value) formData.append('model', modelSelect.value);
 
@@ -651,8 +699,13 @@
           } else if (msg.type === 'result') {
             progressBar.style.width = '100%';
             completeAllSteps();
-            redactedResults = msg.results;
-            renderResults(msg.results);
+            if (reprocessIndices) {
+              // Merge new results back into existing results at the correct positions
+              msg.results.forEach((r, ni) => { redactedResults[reprocessIndices[ni]] = r; });
+            } else {
+              redactedResults = msg.results;
+            }
+            renderResults(redactedResults);
           } else if (msg.type === 'error') {
             throw new Error(msg.error);
           }
@@ -664,10 +717,7 @@
       redactBtn.disabled = false;
       clearBtn.disabled = false;
       if (reprocessBtn) reprocessBtn.disabled = false;
-      setTimeout(() => {
-        progressSection.style.display = 'none';
-        progressBar.style.width = '0%';
-      }, 4000);
+      progressBar.style.width = '100%';
     }
   }
 
@@ -765,6 +815,7 @@
       item.className = 'result-item';
       item.innerHTML = `
         <div class="result-header">
+          <input type="checkbox" class="reprocess-check" data-i="${i}" checked>
           <div class="result-name" title="${r.redactedName}">${r.redactedName}</div>
         </div>
         <div class="result-meta">

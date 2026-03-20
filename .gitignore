@@ -3,3 +3,4 @@ Test-Docs/
 *.log
 .env
 autoresearch-results.tsv
+whitelist.json

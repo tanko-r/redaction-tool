@@ -121,15 +121,15 @@ function findEntitiesBySuffix(text) {
 // Street addresses — number + street name + suffix (+ optional suite/unit)
 const STREET_SUFFIXES = 'Street|St|Avenue|Ave|Boulevard|Blvd|Drive|Dr|Road|Rd|Lane|Ln|Way|Court|Ct|Place|Pl|Circle|Cir|Highway|Hwy|Parkway|Pkwy|Trail|Terrace|Ter|Plaza|Loop';
 const STREET_ADDRESS = new RegExp(
-  `\\b\\d{1,6}\\s+[A-Za-z0-9][A-Za-z0-9\\s]+(?:${STREET_SUFFIXES})\\.?(?:\\s+(?:Suite|Ste|#|Apt|Unit|Floor|Fl)\\.?\\s*[A-Za-z0-9]+)?`,
+  `\\b\\d{1,6}(?:\\s*-\\s*\\d{1,6})?\\s+[A-Za-z0-9][A-Za-z0-9\\s]+(?:${STREET_SUFFIXES})\\.?(?:\\s+(?:Suite|Ste|#|Apt|Unit|Floor|Fl)\\.?\\s*[A-Za-z0-9]+)?`,
   'g'
 );
 
 // P.O. Box addresses
 const PO_BOX = /\bP\.?\s*O\.?\s*Box\s+\d+\b/gi;
 
-// US zip codes — 5-digit or ZIP+4
-const ZIP_CODE = /\b\d{5}(?:-\d{4})?\b/g;
+// US zip codes — 5-digit or ZIP+4, only when preceded by a 2-letter state abbreviation
+const ZIP_CODE = /(?<=\b[A-Z]{2}\s)\d{5}(?:-\d{4})?\b/g;
 
 // Dates in common legal document formats
 const DATE_LONG    = /\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\b/g;

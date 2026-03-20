@@ -6,7 +6,13 @@ Stays alive so the model is only loaded once.
 """
 import sys
 import json
+import re
 import spacy
+
+# Strip lone surrogates that break JSON serialisation
+_SURROGATE_RE = re.compile(r'[\ud800-\udfff]')
+def _clean(s):
+    return _SURROGATE_RE.sub('', s)
 
 nlp = spacy.load("en_core_web_sm")
 
@@ -105,10 +111,6 @@ def process_batch(texts):
                 # Also block if ANY word (stripped of possessives) is a role word
                 if any(w.lower().rstrip("'s\u2019s.,;") in PERSON_BLOCKLIST for w in words):
                     continue
-                # Last word is a place-type indicator → property/location name, not a person
-                last_word = words[-1].lower().rstrip('.,;')
-                if last_word in PLACE_TYPE_WORDS:
-                    continue
                 ents.append({'type': 'PERSON', 'value': text,
                              'start': ent.start_char, 'end': ent.end_char})
 
@@ -154,8 +156,8 @@ for line in sys.stdin:
     if not line:
         continue
     try:
-        texts = json.loads(line)
+        texts = [_clean(t) for t in json.loads(line)]
         results = process_batch(texts)
-        print(json.dumps(results), flush=True)
+        print(json.dumps(results, ensure_ascii=True), flush=True)
     except Exception as e:
         print(json.dumps({'error': str(e)}), flush=True)

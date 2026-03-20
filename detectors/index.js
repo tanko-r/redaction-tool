@@ -15,6 +15,7 @@ let lineBuffer = '';
 const pendingQueue = [];
 
 function startNER() {
+  console.log(`[NER] Starting Python NER subprocess: python ${NER_SCRIPT}`);
   nerProc = spawn('python', [NER_SCRIPT]);
 
   nerProc.stdout.on('data', (chunk) => {
@@ -24,20 +25,44 @@ function startNER() {
     for (const line of lines) {
       if (!line.trim()) continue;
       let msg;
-      try { msg = JSON.parse(line); } catch { continue; }
+      try { msg = JSON.parse(line); } catch {
+        console.warn(`[NER] Non-JSON stdout line: ${line.slice(0, 200)}`);
+        continue;
+      }
 
-      if (msg.ready) { nerReady = true; continue; }
+      if (msg.ready) {
+        nerReady = true;
+        console.log('[NER] Python NER process is ready');
+        continue;
+      }
 
       const next = pendingQueue.shift();
       if (next) {
-        if (msg.error) next.reject(new Error(msg.error));
-        else next.resolve(msg);
+        if (msg.error) {
+          console.error(`[NER] Python error: ${msg.error}`);
+          next.reject(new Error(msg.error));
+        } else {
+          const totalEnts = Array.isArray(msg) ? msg.reduce((s, arr) => s + arr.length, 0) : '?';
+          console.log(`[NER] Response received: ${totalEnts} entities across ${Array.isArray(msg) ? msg.length : '?'} text(s)`);
+          next.resolve(msg);
+        }
       }
     }
   });
 
-  nerProc.stderr.on('data', () => {}); // suppress spaCy startup noise
-  nerProc.on('exit', () => { nerProc = null; nerReady = false; });
+  nerProc.stderr.on('data', (chunk) => {
+    const text = chunk.toString().trim();
+    if (text) console.warn(`[NER] stderr: ${text}`);
+  });
+  nerProc.on('exit', (code) => {
+    console.warn(`[NER] Python process exited with code ${code}`);
+    // Reject any pending promises so they don't hang forever
+    while (pendingQueue.length) {
+      pendingQueue.shift().reject(new Error(`NER process exited (code ${code})`));
+    }
+    nerProc = null;
+    nerReady = false;
+  });
 }
 
 function nerDetect(texts) {
@@ -168,12 +193,18 @@ function propagateValues(texts, allMerged, valueMap, definedTerms, userWhitelist
 async function fetchNerResults(nerTexts) {
   if (nerTexts.length === 0) return nerTexts.map(() => []);
   try {
+    console.log(`[NER] Sending ${nerTexts.length} text(s) to NER`);
     const raw = await nerDetect(nerTexts);
-    if (Array.isArray(raw)) return raw;
+    if (Array.isArray(raw)) {
+      const totalEnts = raw.reduce((s, arr) => s + arr.length, 0);
+      console.log(`[NER] Got ${totalEnts} total entities from ${raw.length} text(s)`);
+      return raw;
+    }
+    console.error(`[NER] Unexpected response type (not array):`, JSON.stringify(raw).slice(0, 200));
   } catch (e) {
-    // eslint-disable-next-line no-console
-    console.error('NER error:', e.message);
+    console.error(`[NER] Error: ${e.message}`);
   }
+  console.warn('[NER] Returning empty results (NER failed or returned non-array)');
   return nerTexts.map(() => []);
 }
 

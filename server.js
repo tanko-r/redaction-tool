@@ -3,6 +3,7 @@ import multer from 'multer';
 import JSZip from 'jszip';
 import { fileURLToPath } from 'url';
 import path from 'path';
+import fs from 'fs';
 import { redactTexts, extractDefinedTerms } from './detectors/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -99,6 +100,32 @@ async function redactDocx(buffer, userWhitelist = new Set(), progress = () => {}
 
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json());
+
+// ── Global whitelist (persisted to whitelist.json) ───────────────────────────
+const WHITELIST_PATH = path.join(__dirname, 'whitelist.json');
+
+function readWhitelistFile() {
+  try {
+    return JSON.parse(fs.readFileSync(WHITELIST_PATH, 'utf8'));
+  } catch {
+    return [];
+  }
+}
+
+function writeWhitelistFile(terms) {
+  fs.writeFileSync(WHITELIST_PATH, JSON.stringify(terms, null, 2) + '\n');
+}
+
+app.get('/api/whitelist', (req, res) => {
+  res.json({ terms: readWhitelistFile() });
+});
+
+app.put('/api/whitelist', (req, res) => {
+  const { terms } = req.body;
+  if (!Array.isArray(terms)) return res.status(400).json({ error: 'terms must be an array' });
+  writeWhitelistFile(terms);
+  res.json({ ok: true });
+});
 
 // Return available Ollama models for the GUI model selector
 app.get('/api/models', async (req, res) => {
