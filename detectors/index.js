@@ -164,6 +164,170 @@ function propagateValues(texts, allMerged, valueMap, definedTerms, userWhitelist
   return added;
 }
 
+// Run NER on the given texts; returns per-text detection arrays (empty on failure or empty input).
+async function fetchNerResults(nerTexts) {
+  if (nerTexts.length === 0) return nerTexts.map(() => []);
+  try {
+    const raw = await nerDetect(nerTexts);
+    if (Array.isArray(raw)) return raw;
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error('NER error:', e.message);
+  }
+  return nerTexts.map(() => []);
+}
+
+const MAX_WORDS = 10;
+const WORDCOUNT_EXEMPT = new Set(['ADDRESS', 'AMOUNT', 'LEGAL_DESCRIPTION', 'ZIP']);
+const NER_WORDCOUNT_EXEMPT = new Set(['MONEY']);
+
+// Tag raw NER results with confidence scores and word-count filter, keyed by text index.
+function buildNerByIndex(nerIndices, nerResults) {
+  const nerByIndex = new Map();
+  for (let j = 0; j < nerIndices.length; j++) {
+    const tagged = (nerResults[j] || [])
+      .filter(d => NER_WORDCOUNT_EXEMPT.has(d.type) || d.value.trim().split(/\s+/).length <= MAX_WORDS)
+      .map(d => ({
+        ...d,
+        confidence: d.type === 'PERSON' ? CONFIDENCE.NER_PERSON
+                  : d.type === 'ORG'    ? CONFIDENCE.NER_ORG
+                  :                       CONFIDENCE.NER_MONEY,
+        source: 'ner',
+      }));
+    nerByIndex.set(nerIndices[j], tagged);
+  }
+  return nerByIndex;
+}
+
+// Merge regex + NER detections for every text, apply word-count cap, return stats.
+function buildMergedDetections(texts, nerByIndex) {
+  let regexTotal = 0, nerTotal = 0, filteredTotal = 0;
+  const allMerged = texts.map((text, i) => {
+    const regex = runRegexDetectors(text);
+    const ner   = nerByIndex.get(i) || [];
+    regexTotal += regex.length;
+    nerTotal   += ner.length;
+    const filtered = mergeDetections(regex, ner).filter(d =>
+      WORDCOUNT_EXEMPT.has(d.type) || d.value.trim().split(/\s+/).length <= MAX_WORDS
+    );
+    filteredTotal += filtered.length;
+    return filtered;
+  });
+  return { allMerged, regexTotal, nerTotal, filteredTotal };
+}
+
+// Build changedNodes + redacted arrays with per-detection traceability.
+function buildChangedNodes(texts, allMerged, definedTerms, userWhitelist) {
+  const changedNodes = [];
+  const redacted = allMerged.map((detections, i) => {
+    const result = applyRedactions(texts[i], detections, definedTerms, userWhitelist);
+    if (result !== texts[i]) {
+      const active = detections.filter(d =>
+        d.approved !== false &&
+        !definedTerms.has(normalizeTerm(d.value)) &&
+        !userWhitelist.has(d.value.toLowerCase())
+      );
+      changedNodes.push({
+        original:   texts[i],
+        redacted:   result,
+        detections: active.map(d => ({
+          value:      d.value,
+          type:       d.type,
+          source:     d.source || 'regex',
+          confidence: d.confidence ?? 1,
+          llmVerdict: d.approved === false ? 'N'
+                    : (d.confidence ?? 1) < LLM_THRESHOLD ? 'Y'
+                    : null,
+        })),
+      });
+    }
+    return result;
+  });
+  return { redacted, changedNodes };
+}
+
+// Build a map of lc-value → meta for detections at or above LLM_THRESHOLD.
+function buildHighConfMap(allMerged) {
+  const map = new Map();
+  allMerged.forEach(detections => {
+    detections.forEach(d => {
+      if ((d.confidence ?? 1) >= LLM_THRESHOLD) {
+        const key = d.value.toLowerCase();
+        if (!map.has(key))
+          map.set(key, { type: d.type, confidence: d.confidence ?? 1, source: d.source });
+      }
+    });
+  });
+  return map;
+}
+
+// Collect low-confidence candidates that haven't been excluded by terms/whitelist.
+function collectLLMCandidates(texts, allMerged, definedTerms, userWhitelist) {
+  const candidates = [];
+  allMerged.forEach((detections, ti) => {
+    detections.forEach((d, di) => {
+      if ((d.confidence ?? 1) < LLM_THRESHOLD &&
+          !definedTerms.has(normalizeTerm(d.value)) &&
+          !userWhitelist.has(d.value.toLowerCase())) {
+        candidates.push({ textIndex: ti, detectionIndex: di, detection: d, context: texts[ti] });
+      }
+    });
+  });
+  return candidates;
+}
+
+// ─── LLM review phase ─────────────────────────────────────────────────────────
+// Deduplicates candidates, calls llmFilter in batches, marks rejections, and
+// propagates approved values back into allMerged. Returns llmLog.
+async function runLLMPhase(texts, allMerged, llmCandidates, definedTerms, userWhitelist, progress, model) {
+  if (llmCandidates.length === 0) return [];
+
+  // Deduplicate by lowercased value — send each unique value once, fan verdict back
+  const valueToIndices = new Map();
+  llmCandidates.forEach((c, idx) => {
+    const key = c.detection.value.toLowerCase();
+    if (!valueToIndices.has(key)) valueToIndices.set(key, []);
+    valueToIndices.get(key).push(idx);
+  });
+
+  const uniqueCandidates = [];
+  const uniqueKeys = [];
+  for (const [key, indices] of valueToIndices) {
+    uniqueCandidates.push(llmCandidates[indices[0]]);
+    uniqueKeys.push(key);
+  }
+
+  const totalBatches = Math.ceil(uniqueCandidates.length / 20);
+  progress({ msg: `LLM reviewing ${uniqueCandidates.length} unique value(s) (${llmCandidates.length} total candidate(s)) in ${totalBatches} batch(es)...`, pct: 60 });
+  const { approved: approvedUnique, llmLog } = await llmFilter(uniqueCandidates, (batchNum, batchTotal, approved, rejected) => {
+    const pct = 60 + Math.round((batchNum / batchTotal) * 30);
+    progress({ msg: `LLM batch ${batchNum}/${batchTotal} complete — ${approved} approved, ${rejected} rejected`, pct });
+  }, model);
+
+  // Mark rejected candidates across all detections sharing the same value
+  const rejectedKeys = new Set();
+  uniqueKeys.forEach((key, i) => { if (!approvedUnique.has(i)) rejectedKeys.add(key); });
+  llmCandidates.forEach(c => {
+    if (rejectedKeys.has(c.detection.value.toLowerCase()))
+      allMerged[c.textIndex][c.detectionIndex].approved = false;
+  });
+
+  // Phase B: propagate LLM-approved values to catch remaining occurrences in other nodes
+  const llmApprovedMap = new Map();
+  uniqueKeys.forEach((key, i) => {
+    if (approvedUnique.has(i)) {
+      const c = uniqueCandidates[i];
+      if (!llmApprovedMap.has(key))
+        llmApprovedMap.set(key, { type: c.detection.type, confidence: 0.85, source: 'propagated' });
+    }
+  });
+  const llmPropAdded = propagateValues(texts, allMerged, llmApprovedMap, definedTerms, userWhitelist);
+  if (llmPropAdded > 0)
+    progress({ msg: `Propagated ${llmApprovedMap.size} LLM-approved value(s) → ${llmPropAdded} additional detection(s)`, pct: 92 });
+
+  return llmLog;
+}
+
 // ─── Main entry point ─────────────────────────────────────────────────────────
 
 /**
@@ -191,165 +355,23 @@ export async function redactTexts(texts, definedTerms, userWhitelist = new Set()
 
   // Run NER on qualifying texts
   progress({ msg: `Running NLP analysis on ${nerTexts.length} qualifying node(s)...`, pct: 30 });
-  let nerResults = nerTexts.map(() => []); // default empty
-  if (nerTexts.length > 0) {
-    try {
-      const raw = await nerDetect(nerTexts);
-      if (Array.isArray(raw)) nerResults = raw;
-    } catch (e) {
-      // eslint-disable-next-line no-console
-      console.error('NER error:', e.message);
-    }
-  }
+  const nerResults = await fetchNerResults(nerTexts);
 
-  // Build per-index NER map, tagging NER results with confidence + source
-  // Apply word-count cap here at the NER stage (MONEY exempt, same as AMOUNT)
-  const MAX_WORDS = 10;
-  const NER_WORDCOUNT_EXEMPT = new Set(['MONEY']);
-  const nerByIndex = new Map();
-  for (let j = 0; j < nerIndices.length; j++) {
-    const tagged = (nerResults[j] || [])
-      .filter(d => NER_WORDCOUNT_EXEMPT.has(d.type) || d.value.trim().split(/\s+/).length <= MAX_WORDS)
-      .map(d => ({
-        ...d,
-        confidence: d.type === 'PERSON' ? CONFIDENCE.NER_PERSON
-                  : d.type === 'ORG'    ? CONFIDENCE.NER_ORG
-                  :                       CONFIDENCE.NER_MONEY,
-        source: 'ner',
-      }));
-    nerByIndex.set(nerIndices[j], tagged);
-  }
-
-  // Types exempt from the word-count cap (addresses, amounts, legal descriptions span many words)
-  const WORDCOUNT_EXEMPT = new Set(['ADDRESS', 'AMOUNT', 'LEGAL_DESCRIPTION', 'ZIP']);
-
-  // Build merged detections per text segment
-  let regexTotal = 0, nerTotal = 0, filteredTotal = 0;
-  const allMerged = texts.map((text, i) => {
-    const regex = runRegexDetectors(text);
-    const ner   = nerByIndex.get(i) || [];
-    regexTotal += regex.length;
-    nerTotal   += ner.length;
-    const merged = mergeDetections(regex, ner);
-    // Drop any detection longer than MAX_WORDS unless it's an exempt type
-    const filtered = merged.filter(d =>
-      WORDCOUNT_EXEMPT.has(d.type) || d.value.trim().split(/\s+/).length <= MAX_WORDS
-    );
-    filteredTotal += filtered.length;
-    return filtered;
-  });
+  const nerByIndex = buildNerByIndex(nerIndices, nerResults);
+  const { allMerged, regexTotal, nerTotal, filteredTotal } = buildMergedDetections(texts, nerByIndex);
   progress({ msg: `Regex: ${regexTotal} hit(s) · NLP: ${nerTotal} hit(s) · ${filteredTotal} candidate(s) after word-count filter`, pct: 55 });
 
-  // Phase A: propagate high-confidence values (>= LLM_THRESHOLD) to all nodes before LLM.
-  // This both catches missed occurrences and reduces the LLM candidate pool.
-  const highConfMap = new Map();
-  allMerged.forEach(detections => {
-    detections.forEach(d => {
-      if ((d.confidence ?? 1) >= LLM_THRESHOLD) {
-        const key = d.value.toLowerCase();
-        if (!highConfMap.has(key))
-          highConfMap.set(key, { type: d.type, confidence: d.confidence ?? 1, source: d.source });
-      }
-    });
-  });
+  // Phase A: propagate high-confidence values before LLM to cut candidate pool
+  const highConfMap = buildHighConfMap(allMerged);
   const propAdded = propagateValues(texts, allMerged, highConfMap, definedTerms, userWhitelist);
   if (propAdded > 0)
     progress({ msg: `Propagated ${highConfMap.size} high-confidence value(s) → ${propAdded} additional detection(s)`, pct: 57 });
 
-  // Collect low-confidence candidates (not already filtered by defined terms / whitelist)
-  // and send them to the LLM in one batch call
-  const llmCandidates = []; // { textIndex, detectionIndex, detection, context }
-  allMerged.forEach((detections, ti) => {
-    detections.forEach((d, di) => {
-      if ((d.confidence ?? 1) < LLM_THRESHOLD &&
-          !definedTerms.has(normalizeTerm(d.value)) &&
-          !userWhitelist.has(d.value.toLowerCase())) {
-        llmCandidates.push({ textIndex: ti, detectionIndex: di, detection: d, context: texts[ti] });
-      }
-    });
-  });
+  const llmCandidates = collectLLMCandidates(texts, allMerged, definedTerms, userWhitelist);
 
-  let llmLog = [];
-  if (llmCandidates.length > 0) {
-    // Deduplicate by lowercased value — send each unique entity value once to the LLM,
-    // then fan the verdict back to all candidates sharing that value.
-    const valueToIndices = new Map(); // lc value → [candidate indices]
-    llmCandidates.forEach((c, idx) => {
-      const key = c.detection.value.toLowerCase();
-      if (!valueToIndices.has(key)) valueToIndices.set(key, []);
-      valueToIndices.get(key).push(idx);
-    });
+  const llmLog = await runLLMPhase(texts, allMerged, llmCandidates, definedTerms, userWhitelist, progress, model);
 
-    // One representative candidate per unique value
-    const uniqueCandidates = [];
-    const uniqueKeys = [];
-    for (const [key, indices] of valueToIndices) {
-      uniqueCandidates.push(llmCandidates[indices[0]]);
-      uniqueKeys.push(key);
-    }
-
-    const totalBatches = Math.ceil(uniqueCandidates.length / 20);
-    progress({ msg: `LLM reviewing ${uniqueCandidates.length} unique value(s) (${llmCandidates.length} total candidate(s)) in ${totalBatches} batch(es)...`, pct: 60 });
-    const { approved: approvedUnique, llmLog: log } = await llmFilter(uniqueCandidates, (batchNum, batchTotal, approved, rejected) => {
-      const pct = 60 + Math.round((batchNum / batchTotal) * 30);
-      progress({ msg: `LLM batch ${batchNum}/${batchTotal} complete — ${approved} approved, ${rejected} rejected`, pct });
-    }, model);
-    llmLog = log;
-
-    // Build a set of rejected value keys, then mark all candidates sharing that value
-    const rejectedKeys = new Set();
-    uniqueKeys.forEach((key, i) => {
-      if (!approvedUnique.has(i)) rejectedKeys.add(key);
-    });
-
-    llmCandidates.forEach((c) => {
-      if (rejectedKeys.has(c.detection.value.toLowerCase())) {
-        allMerged[c.textIndex][c.detectionIndex].approved = false;
-      }
-    });
-
-    // Phase B: propagate LLM-approved values to catch remaining occurrences in other nodes
-    const llmApprovedMap = new Map();
-    uniqueKeys.forEach((key, i) => {
-      if (approvedUnique.has(i)) {
-        const c = uniqueCandidates[i];
-        if (!llmApprovedMap.has(key))
-          llmApprovedMap.set(key, { type: c.detection.type, confidence: 0.85, source: 'propagated' });
-      }
-    });
-    const llmPropAdded = propagateValues(texts, allMerged, llmApprovedMap, definedTerms, userWhitelist);
-    if (llmPropAdded > 0)
-      progress({ msg: `Propagated ${llmApprovedMap.size} LLM-approved value(s) → ${llmPropAdded} additional detection(s)`, pct: 92 });
-  }
-
-  // Build changedNodes with traceability: source, confidence, llm verdict
-  const changedNodes = [];
-  const redacted = allMerged.map((detections, i) => {
-    const result = applyRedactions(texts[i], detections, definedTerms, userWhitelist);
-    if (result !== texts[i]) {
-      // Attach per-detection trace info to the node
-      const active = detections.filter(d =>
-        d.approved !== false &&
-        !definedTerms.has(normalizeTerm(d.value)) &&
-        !userWhitelist.has(d.value.toLowerCase())
-      );
-      changedNodes.push({
-        original:   texts[i],
-        redacted:   result,
-        detections: active.map(d => ({
-          value:      d.value,
-          type:       d.type,
-          source:     d.source || 'regex',
-          confidence: d.confidence ?? 1,
-          llmVerdict: d.approved === false ? 'N'
-                    : (d.confidence ?? 1) < LLM_THRESHOLD ? 'Y'
-                    : null,
-        })),
-      });
-    }
-    return result;
-  });
-
+  const { redacted, changedNodes } = buildChangedNodes(texts, allMerged, definedTerms, userWhitelist);
   return { redacted, llmLog, changedNodes };
 }
 
