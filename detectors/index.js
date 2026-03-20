@@ -122,6 +122,25 @@ function applyRedactions(text, detections, definedTerms, userWhitelist = new Set
 }
 
 // ─── Value propagation ────────────────────────────────────────────────────────
+
+// Find all non-overlapping occurrences of `lcValue` in `text` not already covered.
+function findNewOccurrences(text, existing, lcValue, meta) {
+  const lcText = text.toLowerCase();
+  const additions = [];
+  let searchPos = 0;
+  while (true) {
+    const found = lcText.indexOf(lcValue, searchPos);
+    if (found === -1) break;
+    const end = found + lcValue.length;
+    if (!existing.some(d => d.start < end && d.end > found)) {
+      additions.push({ type: meta.type, value: text.slice(found, end), start: found, end,
+        confidence: meta.confidence, source: 'propagated' });
+    }
+    searchPos = found + 1;
+  }
+  return additions;
+}
+
 // Given a Map of lc-value → {type, confidence, source}, scan all text nodes and
 // inject detections for any occurrence not already covered.
 function propagateValues(texts, allMerged, valueMap, definedTerms, userWhitelist) {
@@ -129,29 +148,10 @@ function propagateValues(texts, allMerged, valueMap, definedTerms, userWhitelist
   let added = 0;
   texts.forEach((text, i) => {
     const existing = allMerged[i];
-    const lcText = text.toLowerCase();
     for (const [lcValue, meta] of valueMap) {
       if (definedTerms.has(normalizeTerm(lcValue)) || userWhitelist.has(lcValue)) continue;
-      let searchPos = 0;
-      while (true) {
-        const found = lcText.indexOf(lcValue, searchPos);
-        if (found === -1) break;
-        const end = found + lcValue.length;
-        // Only add if this span isn't already covered
-        const covered = existing.some(d => d.start < end && d.end > found);
-        if (!covered) {
-          existing.push({
-            type:       meta.type,
-            value:      text.slice(found, end),
-            start:      found,
-            end,
-            confidence: meta.confidence,
-            source:     'propagated',
-          });
-          added++;
-        }
-        searchPos = found + 1;
-      }
+      const newOnes = findNewOccurrences(text, existing, lcValue, meta);
+      newOnes.forEach(d => { existing.push(d); added++; });
     }
     // Re-sort and de-overlap after additions
     existing.sort((a, b) => a.start - b.start);
