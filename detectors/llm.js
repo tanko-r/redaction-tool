@@ -45,10 +45,10 @@ async function runBatch(batch, model) {
   });
 
   const prompt =
-    `You are reviewing a legal real-estate document for redaction.\n` +
-    `For each item below, reply Y if it identifies a specific private person, company, or party that should be redacted.\n` +
-    `Reply N if it is a generic legal term, concept, defined term, place name, or non-sensitive reference.\n` +
-    `Reply with ONLY a JSON array of "Y" or "N" in the same order, nothing else.\n\n` +
+    `You are reviewing a legal document for redaction.\n` +
+    `For each item below, reply Y if it likely identifies a specific private person, company, or party that should be redacted.\n` +
+    `Reply N if it is most likely not a private person, company or party.\n` +
+    `Reply with ONLY a JSON array of "Y" or "N" in the same order, nothing else. For example, ["Y","N","Y"]\n` +
     lines.join('\n') + '\n\nReply:';
 
   const resp = await fetch(OLLAMA_URL, {

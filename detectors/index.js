@@ -15,7 +15,7 @@ let lineBuffer = '';
 const pendingQueue = [];
 
 function startNER() {
-  nerProc = spawn('python3', [NER_SCRIPT]);
+  nerProc = spawn('python', [NER_SCRIPT]);
 
   nerProc.stdout.on('data', (chunk) => {
     lineBuffer += chunk.toString();
