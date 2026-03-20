@@ -113,6 +113,7 @@ export async function llmFilter(candidates, onBatch = () => {}, model = null) {
       onBatch(batchNum, totalBatches, batchApproved.size, batch.length - batchApproved.size);
 
     } catch (err) {
+      // eslint-disable-next-line no-console
       console.warn(`LLM batch ${offset}–${offset + batch.length - 1} failed:`, err.message);
       // Fail open for this batch — mark all as approved
       batch.forEach((_, i) => approved.add(offset + i));

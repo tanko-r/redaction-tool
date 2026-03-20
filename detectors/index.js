@@ -197,6 +197,7 @@ export async function redactTexts(texts, definedTerms, userWhitelist = new Set()
       const raw = await nerDetect(nerTexts);
       if (Array.isArray(raw)) nerResults = raw;
     } catch (e) {
+      // eslint-disable-next-line no-console
       console.error('NER error:', e.message);
     }
   }
